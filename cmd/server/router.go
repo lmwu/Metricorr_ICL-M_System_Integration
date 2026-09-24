@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"time"
 
@@ -28,9 +29,12 @@ func (rt *Router) SetupRoutes() http.Handler {
 
 	mux.HandleFunc("/api/v1/trigger", rt.handleTrigger)
 	mux.HandleFunc("/api/v1/data", rt.handleGetData)
+	mux.HandleFunc("/api/v1/stations", rt.handleGetAllStations)
 
-	// 靜態檔案打包與服務 (Web Dashboard)
-	webFS, _ := fs.Sub(webFiles, "web")
+	webFS, err := fs.Sub(webFiles, "web")
+	if err != nil {
+		log.Fatalf("無法讀取嵌入的 web 目錄: %v", err)
+	}
 	mux.Handle("/", http.FileServer(http.FS(webFS)))
 
 	return mux
@@ -42,39 +46,55 @@ func (rt *Router) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reg 1199 = 1 (Start standard measurement)[cite: 1]
+	stationID := r.URL.Query().Get("station_id")
+	if stationID == "" {
+		stationID = "STATION-001" // 預設測站
+	}
+
+	// Reg 1199 = 1 (觸發測量)[cite: 1]
 	cmd := iclmodbus.BuildWriteSingleRegister(0x01, 1199, 1)
-	resp, err := rt.mqtt.SendCommandAndWait(cmd, 3*time.Second)
+	resp, err := rt.mqtt.SendStationCommand(stationID, cmd, 5*time.Second)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("觸發測量失敗: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("觸發測站 [%s] 測量失敗: %v", stationID, err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "success",
-		"message": "已成功下發測量指令",
-		"raw_hex": fmt.Sprintf("%X", resp),
+		"status":     "success",
+		"station_id": stationID,
+		"message":    "已成功下發測量指令",
+		"raw_hex":    fmt.Sprintf("%X", resp),
 	})
 }
 
 func (rt *Router) handleGetData(w http.ResponseWriter, r *http.Request) {
-	// Reg 1219 起讀取 28 個寄存器[cite: 1]
-	cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 28)
-	resp, err := rt.mqtt.SendCommandAndWait(cmd, 3*time.Second)
+	stationID := r.URL.Query().Get("station_id")
+	if stationID == "" {
+		stationID = "STATION-001"
+	}
+
+	// 讀取 Reg 1219 起 72 個 Registers (Channel 1 & Channel 2)[cite: 1]
+	cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 72)
+	resp, err := rt.mqtt.SendStationCommand(stationID, cmd, 5*time.Second)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("讀取數據失敗: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("讀取測站 [%s] 數據失敗: %v", stationID, err), http.StatusInternalServerError)
 		return
 	}
 
-	data, err := iclmodbus.ParseMeasurementResponse(resp)
+	data, err := iclmodbus.ParseDualChannelResponse(stationID, 0x01, resp)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("數據解析失敗: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	rt.storage.SetLatestData(data)
+	rt.storage.UpdateStationData(stationID, data)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func (rt *Router) handleGetAllStations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rt.storage.GetAllStationsData())
 }

@@ -10,28 +10,40 @@ import (
 	"Metricorr_ICL-M_SI/pkg/iclmodbus"
 )
 
-const (
-	MqttBroker = "tcp://localhost:1883"
-	TopicCMD   = "gateway/ICL001/rx"
-	TopicRESP  = "gateway/ICL001/tx"
-)
+const MqttBroker = "tcp://localhost:1883"
 
 type MQTTService struct {
-	client   mqtt.Client
-	respChan chan []byte
-	mu       sync.Mutex
+	client    mqtt.Client
+	storage   *Storage
+	waitChans map[string]chan []byte // Key: station_id
+	mu        sync.Mutex
 }
 
-func NewMQTTService() *MQTTService {
+func NewMQTTService(storage *Storage) *MQTTService {
 	s := &MQTTService{
-		respChan: make(chan []byte, 10),
+		storage:   storage,
+		waitChans: make(map[string]chan []byte),
 	}
 
-	opts := mqtt.NewClientOptions().AddBroker(MqttBroker).SetClientID("Backend_API_Server")
+	opts := mqtt.NewClientOptions().AddBroker(MqttBroker).SetClientID("CP_Onshore_Backend_Server")
+
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
-		log.Println("[Server] MQTT 已連線")
-		c.Subscribe(TopicRESP, 0, func(client mqtt.Client, msg mqtt.Message) {
-			s.respChan <- msg.Payload()
+		log.Println("[Server] MQTT 已連線，開始訂閱所有陸域 CP 測站通道...")
+
+		// 訂閱所有測站的回傳 Topic: cp-gateway/+/tx
+		c.Subscribe("cp-gateway/+/tx", 0, func(client mqtt.Client, msg mqtt.Message) {
+			topic := msg.Topic()
+			var stationID string
+			fmt.Sscanf(topic, "cp-gateway/%s/tx", &stationID)
+
+			payload := msg.Payload()
+			log.Printf("[MQTT 接收] 來自測站 %s, 資料長度: %d bytes", stationID, len(payload))
+
+			s.mu.Lock()
+			if ch, exists := s.waitChans[stationID]; exists {
+				ch <- payload
+			}
+			s.mu.Unlock()
 		})
 	})
 
@@ -43,24 +55,36 @@ func NewMQTTService() *MQTTService {
 	return s
 }
 
-func (s *MQTTService) SendCommandAndWait(cmdFrame []byte, timeout time.Duration) ([]byte, error) {
+// SendStationCommand 下發 Modbus 指令給指定陸域測站網關
+func (s *MQTTService) SendStationCommand(stationID string, cmdFrame []byte, timeout time.Duration) ([]byte, error) {
+	respChan := make(chan []byte, 1)
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.waitChans[stationID] = respChan
+	s.mu.Unlock()
 
-	for len(s.respChan) > 0 {
-		<-s.respChan
-	}
+	defer func() {
+		s.mu.Lock()
+		delete(s.waitChans, stationID)
+		s.mu.Unlock()
+	}()
 
-	log.Printf("[Server] 發送 Modbus 指令: %X", cmdFrame)
-	s.client.Publish(TopicCMD, 0, false, cmdFrame)
+	targetTopic := fmt.Sprintf("cp-gateway/%s/rx", stationID)
+	log.Printf("[MQTT 發送] 至測站 [%s] Topic: %s", stationID, targetTopic)
+	s.client.Publish(targetTopic, 0, false, cmdFrame)
 
 	select {
-	case resp := <-s.respChan:
+	case resp := <-respChan:
 		if !iclmodbus.VerifyCRC16(resp) {
-			return nil, fmt.Errorf("CRC16 校驗錯誤")
+			return nil, fmt.Errorf("測站 %s 回應之 Modbus CRC16 校驗失敗", stationID)
 		}
 		return resp, nil
 	case <-time.After(timeout):
-		return nil, fmt.Errorf("Modbus 指令回應超時")
+		return nil, fmt.Errorf("測站 %s 回應超時 (4G 訊號不良或設備未開機)", stationID)
 	}
+}
+
+// SendCommandAndWait 舊版相容函式 (預設對 STATION-001 操作)
+func (s *MQTTService) SendCommandAndWait(cmdFrame []byte, timeout time.Duration) ([]byte, error) {
+	return s.SendStationCommand("STATION-001", cmdFrame, timeout)
 }
