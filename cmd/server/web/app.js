@@ -1,3 +1,5 @@
+// cmd/server/web/app.js
+
 async function fetchStations() {
     try {
         const res = await fetch('/api/v1/stations');
@@ -6,7 +8,7 @@ async function fetchStations() {
         container.innerHTML = '';
 
         if (!data || Object.keys(data).length === 0) {
-            container.innerHTML = `<div class="col-span-full p-8 text-center bg-white rounded-xl border text-slate-400">目前尚無已連線之 4G 網關。請啟動 LTE 網关透傳腳本。</div>`;
+            container.innerHTML = `<div class="col-span-full p-8 text-center bg-white rounded-xl border text-slate-400">目前尚無已連線之 4G 網關。請啟動 LTE 網關透傳腳本。</div>`;
             return;
         }
 
@@ -17,6 +19,11 @@ async function fetchStations() {
             const thickness = typeof ch1.thickness === 'number' ? ch1.thickness.toFixed(1) : '--';
             const metalLoss = typeof ch1.metal_loss === 'number' ? ch1.metal_loss.toFixed(2) : '--';
 
+            // 💡 1. 根據後端回傳的 is_online 欄位生成動態燈號標籤
+            const statusBadge = st.is_online
+                ? `<span class="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">已連線</span>`
+                : `<span class="text-xs font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">已離線</span>`;
+
             const cardHtml = `
             <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition">
                 <div class="flex justify-between items-start border-b pb-3 mb-3">
@@ -24,7 +31,11 @@ async function fetchStations() {
                         <span class="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">測站 ID</span>
                         <h3 class="text-lg font-bold text-slate-800 mt-1">${stID}</h3>
                     </div>
-                    <span class="text-[10px] text-slate-400">${st.timestamp || '尚未採集'}</span>
+                    <!-- 💡 2. 右上角同時顯示在線狀態標籤與上次採集時間 -->
+                    <div class="text-right">
+                        <div>${statusBadge}</div>
+                        <div class="text-[10px] text-slate-400 mt-1">${st.timestamp || '尚未採集'}</div>
+                    </div>
                 </div>
 
                 <div class="grid grid-cols-2 gap-3 mb-4 text-xs">

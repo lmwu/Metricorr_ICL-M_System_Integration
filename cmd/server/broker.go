@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log"
+	"strings" // 💡 務必引入 strings 套件
 
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/hooks/auth"
@@ -28,14 +29,16 @@ func (h *ClientLoggerHook) Provides(b byte) bool {
 
 func (h *ClientLoggerHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
 	log.Printf("[Broker] 🟢 Client 連線成功 | ClientID: %s | 來源 IP: %s", cl.ID, cl.Net.Remote)
-	
-	// 💡 【新增過濾】若為後端服務自身連線，不將其寫入 Storage 作為測站
 	if cl.ID == "CP_Onshore_Backend_Server" {
 		return nil
 	}
 
+	// 💡 宣告 stationID
+	stationID := strings.TrimPrefix(cl.ID, "GATEWAY-")
+
 	if h.storage != nil {
-		h.storage.SetGatewayOnlineStatus(cl.ID, cl.Net.Remote, true)
+		// 💡 確保這裡使用的是 stationID，而不是 cl.ID
+		h.storage.SetGatewayOnlineStatus(stationID, cl.Net.Remote, true)
 	}
 	return nil
 }
@@ -46,14 +49,16 @@ func (h *ClientLoggerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool)
 	} else {
 		log.Printf("[Broker] ⚪ Client 正常離線 | ClientID: %s", cl.ID)
 	}
-
-	// 💡 【新增過濾】離線時同樣忽略後端服務自身 ID
 	if cl.ID == "CP_Onshore_Backend_Server" {
 		return
 	}
 
+	// 💡 宣告 stationID
+	stationID := strings.TrimPrefix(cl.ID, "GATEWAY-")
+
 	if h.storage != nil {
-		h.storage.SetGatewayOnlineStatus(cl.ID, cl.Net.Remote, false)
+		// 💡 確保這裡使用的是 stationID，而不是 cl.ID
+		h.storage.SetGatewayOnlineStatus(stationID, cl.Net.Remote, false)
 	}
 }
 
