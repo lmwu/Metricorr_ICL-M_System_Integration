@@ -10,9 +10,9 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
-// 自訂 MQTT 事件監聽 Hook
 type ClientLoggerHook struct {
 	mqtt.HookBase
+	storage *Storage
 }
 
 func (h *ClientLoggerHook) ID() string {
@@ -26,29 +26,30 @@ func (h *ClientLoggerHook) Provides(b byte) bool {
 	}, []byte{b})
 }
 
-// Client 連線成功時觸發（注意：此處需回傳 error 型別，無錯誤時傳回 nil）
 func (h *ClientLoggerHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
 	log.Printf("[Broker] 🟢 Client 連線成功 | ClientID: %s | 來源 IP: %s", cl.ID, cl.Net.Remote)
+	if h.storage != nil {
+		h.storage.SetGatewayOnlineStatus(cl.ID, cl.Net.Remote, true)
+	}
 	return nil
 }
 
-// Client 斷線時觸發
 func (h *ClientLoggerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 	if err != nil {
 		log.Printf("[Broker] 🔴 Client 異常斷線 | ClientID: %s | 原因: %v", cl.ID, err)
 	} else {
 		log.Printf("[Broker] ⚪ Client 正常離線 | ClientID: %s", cl.ID)
 	}
+	if h.storage != nil {
+		h.storage.SetGatewayOnlineStatus(cl.ID, cl.Net.Remote, false)
+	}
 }
 
-func StartEmbeddedMQTTBroker() *mqtt.Server {
+func StartEmbeddedMQTTBroker(storage *Storage) *mqtt.Server {
 	server := mqtt.New(nil)
 
-	// 1. 允許所有連線（無需帳號密碼）
 	_ = server.AddHook(new(auth.AllowHook), nil)
-
-	// 2. 加入連線/斷線日誌 Hook
-	_ = server.AddHook(new(ClientLoggerHook), nil)
+	_ = server.AddHook(&ClientLoggerHook{storage: storage}, nil)
 
 	tcpListener := listeners.NewTCP(listeners.Config{
 		ID:      "inline-mqtt-broker",

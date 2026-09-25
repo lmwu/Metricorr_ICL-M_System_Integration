@@ -35,6 +35,10 @@ func (rt *Router) SetupRoutes() http.Handler {
 
 	// API 2: 單點手動觸發採集 /api/v1/trigger?station_id=ST-KHH-01
 	mux.HandleFunc("/api/v1/trigger", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		stationID := r.URL.Query().Get("station_id")
 		if stationID == "" {
 			http.Error(w, "缺少 station_id 參數", http.StatusBadRequest)
@@ -59,7 +63,7 @@ func (rt *Router) SetupRoutes() http.Handler {
 		json.NewEncoder(w).Encode(data)
 	})
 
-	// API 3: 設定無人值守自動輪詢頻率 (單位: 秒)
+	// API 3: 設定無人值守自動輪詢頻率
 	mux.HandleFunc("/api/v1/scheduler/interval", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -82,7 +86,7 @@ func (rt *Router) SetupRoutes() http.Handler {
 		})
 	})
 
-	// API 4: 取得 SQLite 歷史數據 /api/v1/history?station_id=ST-KHH-01&limit=50
+	// API 4: 取得 SQLite 歷史數據
 	mux.HandleFunc("/api/v1/history", func(w http.ResponseWriter, r *http.Request) {
 		stationID := r.URL.Query().Get("station_id")
 		limitStr := r.URL.Query().Get("limit")
@@ -100,7 +104,13 @@ func (rt *Router) SetupRoutes() http.Handler {
 		json.NewEncoder(w).Encode(history)
 	})
 
-	// 內嵌靜態網站前端頁面
+	// API 5: 查詢連線網關動態狀態
+	mux.HandleFunc("/api/v1/gateways", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rt.storage.GetGatewaysStatus())
+	})
+
+	// 內嵌靜態 Web 頁面
 	webFS, _ := fs.Sub(webFiles, "web")
 	mux.Handle("/", http.FileServer(http.FS(webFS)))
 

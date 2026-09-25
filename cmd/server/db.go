@@ -14,7 +14,7 @@ type Database struct {
 }
 
 func NewDatabase(dbPath string) *Database {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatalf("[DB] 無法開啟 SQLite 資料庫 %s: %v", dbPath, err)
 	}
@@ -47,7 +47,7 @@ func NewDatabase(dbPath string) *Database {
 		log.Fatalf("[DB] 初始化 Data Schema 失敗: %v", err)
 	}
 
-	log.Println("[DB] SQLite 資料庫連線初始化完成: " + dbPath)
+	log.Println("[DB] SQLite 資料庫連線初始化完成（WAL 高併發模式）: " + dbPath)
 	return &Database{db: db}
 }
 
@@ -80,7 +80,8 @@ func (d *Database) GetHistory(stationID string, limit int) ([]iclmodbus.FullMeas
 	}
 	defer rows.Close()
 
-	var list []iclmodbus.FullMeasurementData
+	// 確保即使 0 筆資料也回傳 [] 而非 nil (避免 JSON marshal 為 null)
+	list := make([]iclmodbus.FullMeasurementData, 0)
 	for rows.Next() {
 		var m iclmodbus.FullMeasurementData
 		err := rows.Scan(
@@ -89,11 +90,11 @@ func (d *Database) GetHistory(stationID string, limit int) ([]iclmodbus.FullMeas
 			&m.Channel2.Thickness, &m.Channel2.Uac, &m.Channel2.Iac, &m.Channel2.Jac, &m.Channel2.Eon, &m.Channel2.Eoff, &m.Channel2.Temp, &m.Channel2.MetalLoss,
 		)
 		if err != nil {
-			return nil, err // Scan 失敗時直接 return err
+			return nil, err
 		}
 		list = append(list, m)
 	}
-	// 修正：補上此段檢查迴圈中途是否有讀取錯誤
+
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
