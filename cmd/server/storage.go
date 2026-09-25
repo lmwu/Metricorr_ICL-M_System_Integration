@@ -123,3 +123,16 @@ func (s *Storage) GetPollInterval() time.Duration {
 	defer s.mu.RUnlock()
 	return s.pollInterval
 }
+
+// RemoveStation 將指定測站從動態看板記憶體中移除 (歷史數據仍完好保留於 SQLite DB)
+func (s *Storage) RemoveStation(stationID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. 從動態看板數據中刪除
+	delete(s.stationsData, stationID)
+
+	// 2. 清除對應的網關連線紀錄 (避免網關狀態殘留)
+	delete(s.gateways, stationID)
+	delete(s.gateways, "GATEWAY-"+stationID)
+}

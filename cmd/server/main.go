@@ -72,3 +72,4 @@ func startUnattendedAutoScheduler(mqttSvc *MQTTService, storage *Storage) {
 		}
 	}
 }
+

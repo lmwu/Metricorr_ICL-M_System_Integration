@@ -110,6 +110,27 @@ func (rt *Router) SetupRoutes() http.Handler {
 		json.NewEncoder(w).Encode(rt.storage.GetGatewaysStatus())
 	})
 
+	// 在路由註冊區域 (mux.HandleFunc) 加入以下接口：
+	mux.HandleFunc("/api/v1/station/delete", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodDelete && req.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		stationID := req.URL.Query().Get("station_id")
+		if stationID == "" {
+			http.Error(w, "Missing station_id", http.StatusBadRequest)
+			return
+		}
+
+		// 💡 修正點：使用 r.storage 調用 RemoveStation
+		rt.storage.RemoveStation(stationID)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success","message":"測站已成功廢止撤除"}`))
+	})
+
 	// 內嵌靜態 Web 頁面
 	webFS, _ := fs.Sub(webFiles, "web")
 	mux.Handle("/", http.FileServer(http.FS(webFS)))
