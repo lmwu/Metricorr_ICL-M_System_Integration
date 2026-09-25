@@ -4,30 +4,24 @@ import (
 	"log"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
-	"github.com/mochi-mqtt/server/v2/listeners"
+    "github.com/mochi-mqtt/server/v2/listeners"
 )
 
-// StartEmbeddedMQTTBroker 在背景啟動純 Golang MQTT Broker
 func StartEmbeddedMQTTBroker() *mqtt.Server {
-	// 建立 MQTT Server 實例
 	server := mqtt.New(nil)
-
-	// 建立 TCP 監聽器，監聽預設 1883 埠
-	tcp := listeners.NewTCP(listeners.Config{
+	tcpListener := listeners.NewTCP(listeners.Config{
 		ID:      "inline-mqtt-broker",
-		Address: ":1883",
+		Address: ":8888",
 	})
 
-	err := server.AddListener(tcp)
-	if err != nil {
-		log.Fatalf("[MQTT Broker] 新增 TCP 監聽器失敗: %v", err)
+	if err := server.AddListener(tcpListener); err != nil {
+		log.Fatalf("[Broker] 新增 8888 監聽器失敗: %v", err)
 	}
 
-	// 於 Goroutine 異步啟動 Broker
 	go func() {
-		log.Println("[MQTT Broker] 內建 MQTT Broker 已成功啟動於 :1883 埠...")
+		log.Println("[Broker] 內嵌 MQTT Broker 啟動於 :8888")
 		if err := server.Serve(); err != nil {
-			log.Fatalf("[MQTT Broker] 服務運行異常: %v", err)
+			log.Fatalf("[Broker] 異常退出: %v", err)
 		}
 	}()
 

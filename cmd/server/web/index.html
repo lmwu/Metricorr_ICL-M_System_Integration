@@ -3,54 +3,76 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Metricorr ICL-M 監控後台</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
-        .card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .card h3 { margin: 0 0 10px 0; font-size: 14px; color: #666; }
-        .card .value { font-size: 24px; font-weight: bold; color: #111; }
-        .card .unit { font-size: 14px; color: #888; margin-left: 4px; }
-        .btn-group { margin-top: 20px; display: flex; gap: 10px; }
-        button { background: #0066cc; color: #fff; border: none; padding: 10px 20px; border-radius: 5px; font-size: 14px; cursor: pointer; }
-        button:hover { background: #0052a3; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        .timestamp { font-size: 12px; color: #888; }
-    </style>
+    <title>Metricorr CP/ER 無人值守自動採集後台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2>Metricorr ICL-M 即時監控看板</h2>
-            <span id="timestamp" class="timestamp">未連線</span>
-        </div>
 
-        <div class="card-grid">
-            <div class="card">
-                <h3>探頭剩餘厚度 (Thickness)</h3>
-                <div><span id="thickness" class="value">--</span><span class="unit">µm</span></div>
+<body class="bg-slate-100 min-h-screen text-slate-800">
+    <div class="max-w-7xl mx-auto px-4 py-6">
+        <!-- 頂部標題列 -->
+        <header class="flex flex-col md:flex-row justify-between items-center bg-white p-6 rounded-xl shadow-sm mb-6 border border-slate-200">
+            <div>
+                <h1 class="text-2xl font-bold text-slate-900">Metricorr ICL-M 陸域管道 CP/ER 監控系統</h1>
+                <p class="text-xs text-slate-500 mt-1">陰極防蝕電位 (Eoff)、AC 干擾密度 (Jac) & ER 探針金屬損失率即時自動歸檔</p>
             </div>
-            <div class="card">
-                <h3>累積金屬損失 (Metal Loss)</h3>
-                <div><span id="metalLoss" class="value">--</span><span class="unit">%</span></div>
+            
+            <!-- 無人值守控制項 -->
+            <div class="mt-4 md:mt-0 flex items-center gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <span class="text-sm font-semibold text-slate-700">無人值守自動採集頻率:</span>
+                <select id="pollIntervalSelect" onchange="updateInterval()" class="bg-white border border-slate-300 text-slate-800 text-sm rounded-md px-3 py-1.5 focus:ring-2 focus:ring-blue-500 outline-none">
+                    <option value="60">1 分鐘 (高頻測試)</option>
+                    <option value="600" selected>10 分鐘 (標準)</option>
+                    <option value="3600">1 小時 (常規)</option>
+                    <option value="0">已停用 (僅手動)</option>
+                </select>
+                <span id="schedulerStatus" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                    自動採集運作中
+                </span>
             </div>
-            <div class="card">
-                <h3>斷電電位 (Eoff)</h3>
-                <div><span id="eoff" class="value">--</span><span class="unit">mV</span></div>
-            </div>
-            <div class="card">
-                <h3>交流電流密度 (Jac)</h3>
-                <div><span id="jac" class="value">--</span><span class="unit">A/m²</span></div>
-            </div>
-        </div>
+        </header>
 
-        <div class="btn-group">
-            <button id="btnTrigger" onclick="triggerMeasure()">觸發單次測量</button>
-            <button id="btnRefresh" onclick="fetchData()">讀取最新數據</button>
+        <!-- 即時動態測站清單卡片區 -->
+        <section class="mb-8">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                    <span class="w-2.5 h-2.5 bg-blue-600 rounded-full animate-ping"></span>
+                    動態測站看板 (自動發現)
+                </h2>
+                <button onclick="fetchStations()" class="text-xs bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded text-slate-700">刷新列表</button>
+            </div>
+            <div id="stationCards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- 由 app.js 動態渲染測站卡片 -->
+            </div>
+        </section>
+
+        <!-- 歷史紀錄與 SQLite 資料庫數據 Modal -->
+        <div id="historyModal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex justify-center items-center p-4">
+            <div class="bg-white rounded-xl shadow-xl w-full max-w-5xl max-h-[85vh] flex flex-col">
+                <div class="p-4 border-b flex justify-between items-center">
+                    <h3 id="modalTitle" class="font-bold text-lg text-slate-800">測站歷史數據 - SQLite 資料庫</h3>
+                    <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 font-bold text-xl">&times;</button>
+                </div>
+                <div class="p-4 overflow-y-auto flex-1">
+                    <table class="w-full text-xs text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-100 text-slate-600 border-b">
+                                <th class="p-2">時間戳記</th>
+                                <th class="p-2">Ch1 厚度 (µm)</th>
+                                <th class="p-2">Ch1 金屬損失 (%)</th>
+                                <th class="p-2">Ch1 斷電電位 (mV)</th>
+                                <th class="p-2">Ch1 AC密度 (A/m²)</th>
+                                <th class="p-2">Ch1 溫度 (°C)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyTableBody" class="divide-y">
+                            <!-- 動態插入 SQLite 查詢結果 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
+
     <script src="app.js"></script>
 </body>
 </html>

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -16,85 +15,59 @@ func main() {
 	defer broker.Close()
 	time.Sleep(500 * time.Millisecond)
 
-	// 2. 初始化儲存庫與 MQTT 服務
-	storage := NewStorage()
+	// 2. 初始化 SQLite 資料庫與 Storage
+	db := NewDatabase("metricorr.db")
+	storage := NewStorage(db)
 	mqttSvc := NewMQTTService(storage)
 
-	// 3. 假設陸域管線沿線有 3 個 CP 測站
-	onshoreStations := []string{"STATION-001", "STATION-002", "STATION-003"}
+	// 3. 啟動「無人值守」全自動巡檢輪詢服務
+	go startUnattendedAutoScheduler(mqttSvc, storage)
 
-	// 定時全管線平行採集 (例如每 10 分鐘一次)
-	go startPipelineAutoScan(mqttSvc, storage, onshoreStations, 10*time.Minute)
-
-	// 4. API 路由設定
-	mux := http.NewServeMux()
-
-	// API 1: 取得全管線所有測站最新 CP 數據
-	mux.HandleFunc("/api/v1/stations", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(storage.GetAllStationsData())
-	})
-
-	// API 2: 手動指定單一測站即時觸發採集 /api/v1/trigger?station_id=STATION-001
-	mux.HandleFunc("/api/v1/trigger", func(w http.ResponseWriter, r *http.Request) {
-		stationID := r.URL.Query().Get("station_id")
-		if stationID == "" {
-			http.Error(w, "缺少 station_id 參數", http.StatusBadRequest)
-			return
-		}
-
-		// 下發 Modbus Function 0x03 讀取 72 個 Registers (單台網關的 Slave ID 固定為 1)
-		cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 72)
-		resp, err := mqttSvc.SendStationCommand(stationID, cmd, 5*time.Second)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		data, err := iclmodbus.ParseDualChannelResponse(stationID, 0x01, resp)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		storage.UpdateStationData(stationID, data)
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
-	})
-
-	log.Println("[Server] 陸域陰極防蝕多測站監控後台已啟動於 :8080")
-	http.ListenAndServe(":8080", mux)
+	// 4. 啟動 REST API 與 Web UI (僅限本地 127.0.0.1:8083 供 Nginx 代理)
+	router := NewRouter(mqttSvc, storage, db)
+	listenAddr := "127.0.0.1:8083"
+	log.Printf("[Server] 陰極防蝕無人值守後台 UI 已啟動於: http://%s (請經由 Nginx 代理存取)", listenAddr)
+	
+	if err := http.ListenAndServe(listenAddr, router.SetupRoutes()); err != nil {
+		log.Fatalf("[Server] HTTP 服務啟動失敗: %v", err)
+	}
 }
 
-// 平行掃描全線所有獨立 CP 測站 (Goroutine 併發)
-func startPipelineAutoScan(mqttSvc *MQTTService, storage *Storage, stations []string, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	for range ticker.C {
-		log.Println("[全線巡檢] 開始採集所有陸域 CP 測站數據...")
-		var wg sync.WaitGroup
-
-		for _, stID := range stations {
-			wg.Add(1)
-			go func(stationID string) {
-				defer wg.Done()
-
-				cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 72)
-				resp, err := mqttSvc.SendStationCommand(stationID, cmd, 5*time.Second)
-				if err != nil {
-					log.Printf("[掃描失敗] 測站 %s 無回應: %v", stationID, err)
-					return
-				}
-
-				data, err := iclmodbus.ParseDualChannelResponse(stationID, 0x01, resp)
-				if err == nil {
-					storage.UpdateStationData(stationID, data)
-					log.Printf("[掃描成功] 測站 %s | Ch1 Eoff: %.3f V", stationID, data.Channel1.Eoff)
-				}
-			}(stID)
+// 動態響應使用者設定的自動巡檢 Worker
+func startUnattendedAutoScheduler(mqttSvc *MQTTService, storage *Storage) {
+	for {
+		interval := storage.GetPollInterval()
+		if interval <= 0 {
+			// 當前使用者設為停用採集，每 3 秒檢查一次狀態
+			time.Sleep(3 * time.Second)
+			continue
 		}
 
-		wg.Wait()
-		log.Println("[全線巡檢] 所有測站採集完畢。")
+		log.Printf("[自動巡檢] 開始針對所有已註冊測站執行採集 (下次採集將於 %v 後)...", interval)
+
+		stations := storage.GetStationIDs()
+		if len(stations) > 0 {
+			var wg sync.WaitGroup
+			for _, stID := range stations {
+				wg.Add(1)
+				go func(stationID string) {
+					defer wg.Done()
+					cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 72)
+					resp, err := mqttSvc.SendStationCommand(stationID, cmd, 5*time.Second)
+					if err != nil {
+						log.Printf("[自動採集失敗] 測站 %s: %v", stationID, err)
+						return
+					}
+					data, err := iclmodbus.ParseDualChannelResponse(stationID, resp)
+					if err == nil {
+						storage.UpdateStationData(data)
+						log.Printf("[自動採集成功] 測站 %s | Ch1 Eoff: %.3f V | MetalLoss: %.2f%%", stationID, data.Channel1.Eoff, data.Channel1.MetalLoss)
+					}
+				}(stID)
+			}
+			wg.Wait()
+		}
+
+		time.Sleep(interval)
 	}
 }

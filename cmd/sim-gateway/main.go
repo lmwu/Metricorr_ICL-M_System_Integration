@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"time"
 
@@ -8,36 +9,33 @@ import (
 	"go.bug.st/serial"
 )
 
-const (
-	MqttBroker = "tcp://localhost:1883"
-	TopicCMD   = "gateway/ICL001/rx"
-	TopicRESP  = "gateway/ICL001/tx"
-	ComPort    = "COM3" // 請修改為電腦實際 COM 埠 (Linux 例: /dev/ttyUSB0)
-	BaudRate   = 19200  // 依據 ICL-M 預設值[cite: 1]
-)
-
 func main() {
+	stationID := flag.String("station", "ST-TXG-01", "測站 ID (如 ST-TXG-01)")
+	comPort := flag.String("port", "COM3", "RS485 COM 埠")
+	brokerAddr := flag.String("broker", "tcp://127.0.0.1:8888", "MQTT Broker 位址")
+	flag.Parse()
+
 	mode := &serial.Mode{
-		BaudRate: BaudRate,
+		BaudRate: 19200, // 依據 ICL-M 預設值[cite: 1]
 		DataBits: 8,
 		Parity:   serial.NoParity,
 		StopBits: serial.OneStopBit,
 	}
-	port, err := serial.Open(ComPort, mode)
+	port, err := serial.Open(*comPort, mode)
 	if err != nil {
-		log.Fatalf("無法開啟串口 %s: %v", ComPort, err)
+		log.Fatalf("[SimGateway] 無法開啟 RS485 串口 %s: %v", *comPort, err)
 	}
 	defer port.Close()
-	log.Printf("[SimGateway] 成功連線 RS485 串口: %s", ComPort)
 
-	opts := mqtt.NewClientOptions().AddBroker(MqttBroker).SetClientID("Golang_LTE_Sim_Gateway")
-	opts.SetAutoReconnect(true)
+	topicCMD := "cp-gateway/" + *stationID + "/rx"
+	topicRESP := "cp-gateway/" + *stationID + "/tx"
 
+	opts := mqtt.NewClientOptions().AddBroker(*brokerAddr).SetClientID("SimGateway_" + *stationID)
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
-		log.Println("[SimGateway] 已連線至 MQTT Broker")
-		c.Subscribe(TopicCMD, 0, func(client mqtt.Client, msg mqtt.Message) {
+		log.Printf("[SimGateway] 測站 %s 已連線至 MQTT Broker", *stationID)
+		c.Subscribe(topicCMD, 0, func(client mqtt.Client, msg mqtt.Message) {
 			payload := msg.Payload()
-			log.Printf("[SimGateway] [MQTT -> RS485] 寫入: %X", payload)
+			log.Printf("[SimGateway] [%s] 收到下發指令，寫入 RS485: %X", *stationID, payload)
 			port.Write(payload)
 		})
 	})
@@ -50,16 +48,12 @@ func main() {
 	buf := make([]byte, 512)
 	for {
 		n, err := port.Read(buf)
-		if err != nil {
-			log.Printf("[SimGateway] 串口讀取錯誤: %v", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
+		if err == nil && n > 0 {
+			resp := make([]byte, n)
+			copy(resp, buf[:n])
+			log.Printf("[SimGateway] [%s] 透傳 RS485 響應至 MQTT: %X", *stationID, resp)
+			client.Publish(topicRESP, 0, false, resp)
 		}
-		if n > 0 {
-			receivedData := make([]byte, n)
-			copy(receivedData, buf[:n])
-			log.Printf("[SimGateway] [RS485 -> MQTT] 透傳: %X", receivedData)
-			client.Publish(TopicRESP, 0, false, receivedData)
-		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

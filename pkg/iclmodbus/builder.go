@@ -2,7 +2,7 @@ package iclmodbus
 
 import "encoding/binary"
 
-// BuildReadHoldingRegisters 建立 Modbus Function 0x03 封包
+// BuildReadHoldingRegisters 建立 Modbus Function 0x03 讀取指令碼[cite: 1]
 func BuildReadHoldingRegisters(slaveID byte, startReg uint16, count uint16) []byte {
 	frame := make([]byte, 6, 8)
 	frame[0] = slaveID
@@ -14,7 +14,7 @@ func BuildReadHoldingRegisters(slaveID byte, startReg uint16, count uint16) []by
 	return append(frame, byte(crc&0xFF), byte(crc>>8))
 }
 
-// BuildWriteSingleRegister 建立 Modbus Function 0x06 封包
+// BuildWriteSingleRegister 建立 Modbus Function 0x06 單一暫存器寫入指令碼[cite: 1]
 func BuildWriteSingleRegister(slaveID byte, reg uint16, value uint16) []byte {
 	frame := make([]byte, 6, 8)
 	frame[0] = slaveID
