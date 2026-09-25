@@ -4,11 +4,13 @@ import (
 	"log"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
+	"github.com/mochi-mqtt/server/v2/hooks/auth"
     "github.com/mochi-mqtt/server/v2/listeners"
 )
 
 func StartEmbeddedMQTTBroker() *mqtt.Server {
 	server := mqtt.New(nil)
+	_ = server.AddHook(new(auth.AllowHook), nil) // 允許所有連線
 	tcpListener := listeners.NewTCP(listeners.Config{
 		ID:      "inline-mqtt-broker",
 		Address: ":8888",
