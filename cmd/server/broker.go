@@ -1,88 +1,88 @@
 package main
 
 import (
-	"bytes"
+	"fmt"
 	"log"
-	"strings" // 💡 務必引入 strings 套件
+	"sync"
+	"time"
 
-	mqtt "github.com/mochi-mqtt/server/v2"
-	"github.com/mochi-mqtt/server/v2/hooks/auth"
-	"github.com/mochi-mqtt/server/v2/listeners"
-	"github.com/mochi-mqtt/server/v2/packets"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type ClientLoggerHook struct {
-	mqtt.HookBase
-	storage *Storage
+type MQTTService struct {
+	client   mqtt.Client
+	respMap  sync.Map // key: stationID, value: chan []byte
+	cmdLocks sync.Map // key: stationID, value: *sync.Mutex (防止請求併發覆蓋)
 }
 
-func (h *ClientLoggerHook) ID() string {
-	return "client-logger"
-}
+func NewMQTTService(brokerURL string) (*MQTTService, error) {
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(brokerURL)
+	opts.SetClientID("metricorr-server-" + fmt.Sprintf("%d", time.Now().UnixNano()))
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
 
-func (h *ClientLoggerHook) Provides(b byte) bool {
-	return bytes.Contains([]byte{
-		mqtt.OnConnect,
-		mqtt.OnDisconnect,
-	}, []byte{b})
-}
+	svc := &MQTTService{}
 
-func (h *ClientLoggerHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
-	log.Printf("[Broker] 🟢 Client 連線成功 | ClientID: %s | 來源 IP: %s", cl.ID, cl.Net.Remote)
-	if cl.ID == "CP_Onshore_Backend_Server" {
-		return nil
-	}
-
-	// 💡 宣告 stationID
-	stationID := strings.TrimPrefix(cl.ID, "GATEWAY-")
-
-	if h.storage != nil {
-		// 💡 確保這裡使用的是 stationID，而不是 cl.ID
-		h.storage.SetGatewayOnlineStatus(stationID, cl.Net.Remote, true)
-	}
-	return nil
-}
-
-func (h *ClientLoggerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
-	if err != nil {
-		log.Printf("[Broker] 🔴 Client 異常斷線 | ClientID: %s | 原因: %v", cl.ID, err)
-	} else {
-		log.Printf("[Broker] ⚪ Client 正常離線 | ClientID: %s", cl.ID)
-	}
-	if cl.ID == "CP_Onshore_Backend_Server" {
-		return
-	}
-
-	// 💡 宣告 stationID
-	stationID := strings.TrimPrefix(cl.ID, "GATEWAY-")
-
-	if h.storage != nil {
-		// 💡 確保這裡使用的是 stationID，而不是 cl.ID
-		h.storage.SetGatewayOnlineStatus(stationID, cl.Net.Remote, false)
-	}
-}
-
-func StartEmbeddedMQTTBroker(storage *Storage) *mqtt.Server {
-	server := mqtt.New(nil)
-
-	_ = server.AddHook(new(auth.AllowHook), nil)
-	_ = server.AddHook(&ClientLoggerHook{storage: storage}, nil)
-
-	tcpListener := listeners.NewTCP(listeners.Config{
-		ID:      "inline-mqtt-broker",
-		Address: ":8888",
+	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+		var stationID string
+		if _, err := fmt.Sscanf(msg.Topic(), "cp-gateway/%s/tx", &stationID); err == nil {
+			if val, ok := svc.respMap.Load(stationID); ok {
+				ch := val.(chan []byte)
+				select {
+				case ch <- msg.Payload():
+				default:
+				}
+			}
+		}
 	})
 
-	if err := server.AddListener(tcpListener); err != nil {
-		log.Fatalf("[Broker] 新增 8888 監聽器失敗: %v", err)
+	client := mqtt.NewClient(opts)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		return nil, token.Error()
 	}
 
-	go func() {
-		log.Println("[Broker] 內嵌 MQTT Broker 啟動於 :8888")
-		if err := server.Serve(); err != nil {
-			log.Fatalf("[Broker] 異常退出: %v", err)
-		}
-	}()
+	svc.client = client
 
-	return server
+	// 訂閱回應 Topic
+	if token := client.Subscribe("cp-gateway/+/tx", 0, nil); token.Wait() && token.Error() != nil {
+		return nil, token.Error()
+	}
+
+	log.Println("[MQTT] 🔌 已成功連線至 Broker 並完成 Topic 訂閱")
+	return svc, nil
+}
+
+// SendStationCommand 發送指令給特定測站（具備測站等級防併發覆蓋鎖）
+func (s *MQTTService) SendStationCommand(stationID string, payload []byte, timeout time.Duration) ([]byte, error) {
+	// 取得或初始化測站專屬 Mutex
+	lockVal, _ := s.cmdLocks.LoadOrStore(stationID, &sync.Mutex{})
+	stationLock := lockVal.(*sync.Mutex)
+	
+	stationLock.Lock()
+	defer stationLock.Unlock()
+
+	respCh := make(chan []byte, 1)
+	s.respMap.Store(stationID, respCh)
+	defer s.respMap.Delete(stationID)
+
+	topicRx := fmt.Sprintf("cp-gateway/%s/rx", stationID)
+	token := s.client.Publish(topicRx, 0, false, payload)
+	token.Wait()
+	if token.Error() != nil {
+		return nil, fmt.Errorf("MQTT 發送失敗: %v", token.Error())
+	}
+
+	select {
+	case data := <-respCh:
+		return data, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("[%s] 指令回應超時", stationID)
+	}
+}
+
+func (s *MQTTService) Close() {
+	if s.client != nil && s.client.IsConnected() {
+		s.client.Disconnect(250)
+	}
 }

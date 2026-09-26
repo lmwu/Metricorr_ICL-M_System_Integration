@@ -1,6 +1,6 @@
 package iclmodbus
 
-// CalculateCRC16 計算 Modbus RTU CRC16 校驗碼
+// CalculateCRC16 計算 Modbus RTU 的 CRC16 (Poly: 0xA001)
 func CalculateCRC16(data []byte) uint16 {
 	var crc uint16 = 0xFFFF
 	for _, b := range data {
@@ -16,13 +16,8 @@ func CalculateCRC16(data []byte) uint16 {
 	return crc
 }
 
-// VerifyCRC16 驗證 Modbus RTU 封包的 CRC16
-func VerifyCRC16(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-	payloadLen := len(data) - 2
-	expectedCRC := CalculateCRC16(data[:payloadLen])
-	actualCRC := uint16(data[payloadLen]) | (uint16(data[payloadLen+1]) << 8)
-	return expectedCRC == actualCRC
+// AppendCRC 為指令自動補上 Modbus RTU CRC16 (Low Byte 在前, High Byte 在後)
+func AppendCRC(data []byte) []byte {
+	crc := CalculateCRC16(data)
+	return append(data, byte(crc&0xFF), byte(crc>>8))
 }

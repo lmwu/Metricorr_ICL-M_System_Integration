@@ -1,78 +1,138 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Metricorr CP/ER 無人值守自動採集後台</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>金茂企業 Metricorr ICL-M 陰極防蝕與腐蝕監控平台</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js 繪圖庫 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 </head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
 
-<body class="bg-slate-100 min-h-screen text-slate-800">
-    <div class="max-w-7xl mx-auto px-4 py-6">
-        <!-- 頂部標題列 -->
-        <header class="flex flex-col md:flex-row justify-between items-center bg-white p-6 rounded-xl shadow-sm mb-6 border border-slate-200">
-            <div>
-                <h1 class="text-2xl font-bold text-slate-900">Metricorr ICL-M 陸域管道 CP/ER 監控系統</h1>
-                <p class="text-xs text-slate-500 mt-1">陰極防蝕電位 (Eoff)、AC 干擾密度 (Jac) & ER 探針金屬損失率即時自動歸檔</p>
-            </div>
-            
-            <!-- 無人值守控制項 -->
-            <div class="mt-4 md:mt-0 flex items-center gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200">
-                <span class="text-sm font-semibold text-slate-700">無人值守自動採集頻率:</span>
-                <select id="pollIntervalSelect" onchange="updateInterval()" class="bg-white border border-slate-300 text-slate-800 text-sm rounded-md px-3 py-1.5 focus:ring-2 focus:ring-blue-500 outline-none">
-                    <option value="60">1 分鐘 (高頻測試)</option>
-                    <option value="600" selected>10 分鐘 (標準)</option>
-                    <option value="3600">1 小時 (常規)</option>
-                    <option value="0">已停用 (僅手動)</option>
-                </select>
-                <span id="schedulerStatus" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                    自動採集運作中
-                </span>
-            </div>
-        </header>
+  <!-- Header 導航欄 -->
+  <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
+    <div class="flex items-center space-x-3">
+      <div class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+      <h1 class="text-xl font-bold text-white tracking-wide">Metricorr ICL-M 遠端監控後台</h1>
+    </div>
+    <div class="flex items-center space-x-4">
+      <select id="stationSelect" onchange="switchStation()" class="bg-slate-700 text-white text-sm rounded px-3 py-1.5 border border-slate-600 focus:outline-none focus:border-emerald-500">
+        <option value="">載入測站中...</option>
+      </select>
+      <button onclick="triggerMeasurement()" id="btnTrigger" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-4 py-1.5 rounded shadow transition flex items-center space-x-2">
+        <span id="btnText">⚡ 立即手動探採</span>
+      </button>
+    </div>
+  </header>
 
-        <!-- 即時動態測站清單卡片區 -->
-        <section class="mb-8">
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">
-                    <span class="w-2.5 h-2.5 bg-blue-600 rounded-full animate-ping"></span>
-                    動態測站看板 (自動發現)
-                </h2>
-                <button onclick="fetchStations()" class="text-xs bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded text-slate-700">刷新列表</button>
-            </div>
-            <div id="stationCards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <!-- 由 app.js 動態渲染測站卡片 -->
-            </div>
-        </section>
+  <!-- 主內容區 -->
+  <main class="p-6 max-w-7xl mx-auto space-y-6">
 
-        <!-- 歷史紀錄與 SQLite 資料庫數據 Modal -->
-        <div id="historyModal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex justify-center items-center p-4">
-            <div class="bg-white rounded-xl shadow-xl w-full max-w-5xl max-h-[85vh] flex flex-col">
-                <div class="p-4 border-b flex justify-between items-center">
-                    <h3 id="modalTitle" class="font-bold text-lg text-slate-800">測站歷史數據 - SQLite 資料庫</h3>
-                    <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 font-bold text-xl">&times;</button>
-                </div>
-                <div class="p-4 overflow-y-auto flex-1">
-                    <table class="w-full text-xs text-left border-collapse">
-                        <thead>
-                            <tr class="bg-slate-100 text-slate-600 border-b">
-                                <th class="p-2">時間戳記</th>
-                                <th class="p-2">Ch1 厚度 (µm)</th>
-                                <th class="p-2">Ch1 金屬損失 (%)</th>
-                                <th class="p-2">Ch1 斷電電位 (mV)</th>
-                                <th class="p-2">Ch1 AC密度 (A/m²)</th>
-                                <th class="p-2">Ch1 溫度 (°C)</th>
-                            </tr>
-                        </thead>
-                        <tbody id="historyTableBody" class="divide-y">
-                            <!-- 動態插入 SQLite 查詢結果 -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
+    <!-- 狀態警示與時間標籤 -->
+    <div class="flex justify-between items-center bg-slate-800/60 p-4 rounded-lg border border-slate-700">
+      <div>
+        <span class="text-xs text-slate-400 block">當前選取測站</span>
+        <span id="currentStationTitle" class="text-lg font-bold text-emerald-400">STATION-001</span>
+      </div>
+      <div class="text-right">
+        <span class="text-xs text-slate-400 block">最後更新時間</span>
+        <span id="lastUpdated" class="text-sm font-mono text-slate-300">--:--:--</span>
+      </div>
     </div>
 
-    <script src="app.js"></script>
+    <!-- 探針通道 1 與 通道 2 關鍵指標卡片 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+      <!-- Channel 1 卡片 -->
+      <div class="bg-slate-800 rounded-xl p-5 border border-slate-700 shadow-lg space-y-4">
+        <div class="flex justify-between items-center border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center space-x-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-blue-400"></span>
+            <span>Channel 1 (ER Probe 1)</span>
+          </h2>
+          <span class="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">試片通道</span>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 text-sm">
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">斷電電位 (Eoff)</span>
+            <div class="text-xl font-bold font-mono text-emerald-400 mt-1"><span id="ch1_eoff">--</span> <span class="text-xs text-slate-400">V</span></div>
+          </div>
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">交流電流密度 (Jac)</span>
+            <div class="text-xl font-bold font-mono text-amber-400 mt-1"><span id="ch1_jac">--</span> <span class="text-xs text-slate-400">A/m²</span></div>
+          </div>
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">探針剩餘厚度</span>
+            <div class="text-xl font-bold font-mono text-sky-400 mt-1"><span id="ch1_thickness">--</span> <span class="text-xs text-slate-400">µm</span></div>
+          </div>
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">累積金屬損失</span>
+            <div class="text-xl font-bold font-mono text-rose-400 mt-1"><span id="ch1_metal_loss">--</span> <span class="text-xs text-slate-400">%</span></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2 text-xs text-slate-400 pt-2 border-t border-slate-700/50">
+          <div>Eon: <span id="ch1_eon" class="text-slate-200 font-mono">--</span> V</div>
+          <div>Uac: <span id="ch1_uac" class="text-slate-200 font-mono">--</span> V</div>
+          <div>Temp: <span id="ch1_temp" class="text-slate-200 font-mono">--</span> °C</div>
+        </div>
+      </div>
+
+      <!-- Channel 2 卡片 -->
+      <div class="bg-slate-800 rounded-xl p-5 border border-slate-700 shadow-lg space-y-4">
+        <div class="flex justify-between items-center border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center space-x-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+            <span>Channel 2 (ER Probe 2)</span>
+          </h2>
+          <span class="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">管道/參考通道</span>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 text-sm">
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">斷電電位 (Eoff)</span>
+            <div class="text-xl font-bold font-mono text-emerald-400 mt-1"><span id="ch2_eoff">--</span> <span class="text-xs text-slate-400">V</span></div>
+          </div>
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">交流電流密度 (Jac)</span>
+            <div class="text-xl font-bold font-mono text-amber-400 mt-1"><span id="ch2_jac">--</span> <span class="text-xs text-slate-400">A/m²</span></div>
+          </div>
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">探針剩餘厚度</span>
+            <div class="text-xl font-bold font-mono text-sky-400 mt-1"><span id="ch2_thickness">--</span> <span class="text-xs text-slate-400">µm</span></div>
+          </div>
+          <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
+            <span class="text-xs text-slate-400">累積金屬損失</span>
+            <div class="text-xl font-bold font-mono text-rose-400 mt-1"><span id="ch2_metal_loss">--</span> <span class="text-xs text-slate-400">%</span></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2 text-xs text-slate-400 pt-2 border-t border-slate-700/50">
+          <div>Eon: <span id="ch2_eon" class="text-slate-200 font-mono">--</span> V</div>
+          <div>Uac: <span id="ch2_uac" class="text-slate-200 font-mono">--</span> V</div>
+          <div>Temp: <span id="ch2_temp" class="text-slate-200 font-mono">--</span> °C</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 歷史數據趨勢圖表 -->
+    <div class="bg-slate-800 rounded-xl p-5 border border-slate-700 shadow-lg">
+      <h3 class="font-bold text-white mb-4">陰極防蝕 Eoff 電位與探針厚度變化趨勢</h3>
+      <div class="h-72 w-full">
+        <canvas id="trendChart"></canvas>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- 前端邏輯 App.js -->
+  <script src="app.js"></script>
+
 </body>
 </html>

@@ -1,245 +1,235 @@
-// cmd/server/web/app.js
+// 自動偵測當前 Server API Host，匹配 router.go 的路由
+const API_BASE = `${window.location.protocol}//${window.location.host}/api`;
 
-async function fetchStations() {
-    try {
-        const res = await fetch('/api/v1/stations');
-        const data = await res.json();
-        const container = document.getElementById('stationCards');
-        container.innerHTML = '';
+let currentStation = "";
+let chartInstance = null;
+let pollTimeout = null;
 
-        if (!data || Object.keys(data).length === 0) {
-            container.innerHTML = `<div class="col-span-full p-8 text-center bg-white rounded-xl border text-slate-400">目前尚無已連線之 4G 網關。請啟動 LTE 網關透傳腳本。</div>`;
-            return;
-        }
+const ui = {
+    stationSelect: null,
+    currentStationTitle: null,
+    lastUpdated: null,
+    btnTrigger: null,
+    btnText: null,
+    ch1: {},
+    ch2: {}
+};
 
-        for (const [stID, st] of Object.entries(data)) {
-            const ch1 = st.channel_1 || {};
-            const ch2 = st.channel_2 || {};
+document.addEventListener("DOMContentLoaded", () => {
+    ui.stationSelect = document.getElementById("stationSelect");
+    ui.currentStationTitle = document.getElementById("currentStationTitle");
+    ui.lastUpdated = document.getElementById("lastUpdated");
+    ui.btnTrigger = document.getElementById("btnTrigger");
+    ui.btnText = document.getElementById("btnText");
 
-            // 判斷是否有啟用 Channel 2 (若有剩餘厚度或電位數據則視為啟用)
-            const hasCh2 = ch2 && (typeof ch2.thickness === 'number' && ch2.thickness > 0 || typeof ch2.e_off === 'number' && ch2.e_off !== 0);
-
-            // 狀態標籤
-            const statusBadge = st.is_online
-                ? `<span class="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">已連線</span>`
-                : `<span class="text-xs font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">已離線</span>`;
-
-            // Channel 1 數據解包
-            const ch1_eOff = typeof ch1.e_off === 'number' ? (ch1.e_off * 1000).toFixed(1) : '--';
-            const ch1_jAc = typeof ch1.j_ac === 'number' ? ch1.j_ac.toFixed(2) : '--';
-            const ch1_thickness = typeof ch1.thickness === 'number' ? ch1.thickness.toFixed(1) : '--';
-            const ch1_metalLoss = typeof ch1.metal_loss === 'number' ? ch1.metal_loss.toFixed(2) : '--';
-
-            // Channel 2 數據解包
-            const ch2_eOff = typeof ch2.e_off === 'number' ? (ch2.e_off * 1000).toFixed(1) : '--';
-            const ch2_jAc = typeof ch2.j_ac === 'number' ? ch2.j_ac.toFixed(2) : '--';
-            const ch2_thickness = typeof ch2.thickness === 'number' ? ch2.thickness.toFixed(1) : '--';
-            const ch2_metalLoss = typeof ch2.metal_loss === 'number' ? ch2.metal_loss.toFixed(2) : '--';
-
-            // 構建通道數據區域 HTML
-            let channelsHtml = '';
-
-            if (hasCh2) {
-                // 雙通道（Ch1 & Ch2）並列渲染
-                channelsHtml = `
-                <div class="grid grid-cols-2 gap-4 mb-4 border-t pt-3">
-                    <!-- Channel 1 區塊 -->
-                    <div>
-                        <div class="text-xs font-bold text-slate-700 mb-2 pb-1 border-b flex items-center gap-1">
-                            <span class="w-2 h-2 rounded-full bg-blue-500"></span> Channel 1 (探頭 1)
-                        </div>
-                        <div class="grid grid-cols-2 gap-2 text-xs">
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">Eoff 斷電電位</span>
-                                <span class="text-sm font-bold text-slate-800">${ch1_eOff} mV</span>
-                            </div>
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">Jac AC 干擾</span>
-                                <span class="text-sm font-bold ${ch1.j_ac > 30 ? 'text-red-600' : 'text-slate-800'}">${ch1_jAc} A/m²</span>
-                            </div>
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">ER 剩餘厚度</span>
-                                <span class="text-sm font-bold text-slate-800">${ch1_thickness} µm</span>
-                            </div>
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">累積金屬損失</span>
-                                <span class="text-sm font-bold text-slate-800">${ch1_metalLoss} %</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Channel 2 區塊 -->
-                    <div>
-                        <div class="text-xs font-bold text-slate-700 mb-2 pb-1 border-b flex items-center gap-1">
-                            <span class="w-2 h-2 rounded-full bg-purple-500"></span> Channel 2 (探頭 2)
-                        </div>
-                        <div class="grid grid-cols-2 gap-2 text-xs">
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">Eoff 斷電電位</span>
-                                <span class="text-sm font-bold text-slate-800">${ch2_eOff} mV</span>
-                            </div>
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">Jac AC 干擾</span>
-                                <span class="text-sm font-bold ${ch2.j_ac > 30 ? 'text-red-600' : 'text-slate-800'}">${ch2_jAc} A/m²</span>
-                            </div>
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">ER 剩餘厚度</span>
-                                <span class="text-sm font-bold text-slate-800">${ch2_thickness} µm</span>
-                            </div>
-                            <div class="bg-slate-50 p-2 rounded">
-                                <span class="text-slate-500 block text-[10px]">累積金屬損失</span>
-                                <span class="text-sm font-bold text-slate-800">${ch2_metalLoss} %</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>`;
-            } else {
-                // 單通道（僅 Ch1）簡明渲染
-                channelsHtml = `
-                <div class="grid grid-cols-2 gap-3 mb-4 text-xs">
-                    <div class="bg-slate-50 p-2.5 rounded">
-                        <span class="text-slate-500 block">Ch1 斷電電位 Eoff</span>
-                        <span class="text-base font-bold text-slate-800">${ch1_eOff} mV</span>
-                    </div>
-                    <div class="bg-slate-50 p-2.5 rounded">
-                        <span class="text-slate-500 block">AC 干擾密度 Jac</span>
-                        <span class="text-base font-bold ${ch1.j_ac > 30 ? 'text-red-600' : 'text-slate-800'}">${ch1_jAc} A/m²</span>
-                    </div>
-                    <div class="bg-slate-50 p-2.5 rounded">
-                        <span class="text-slate-500 block">ER 探頭剩餘厚度</span>
-                        <span class="text-base font-bold text-slate-800">${ch1_thickness} µm</span>
-                    </div>
-                    <div class="bg-slate-50 p-2.5 rounded">
-                        <span class="text-slate-500 block">累積金屬損失</span>
-                        <span class="text-base font-bold text-slate-800">${ch1_metalLoss} %</span>
-                    </div>
-                </div>`;
-            }
-
-            const cardHtml = `
-            <div class="${hasCh2 ? 'col-span-2' : ''} bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition">
-                <div class="flex justify-between items-start pb-3 mb-3">
-                    <div>
-                        <span class="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">測站 ID</span>
-                        <h3 class="text-lg font-bold text-slate-800 mt-1">${stID}</h3>
-                    </div>
-                    <div class="text-right">
-                        <div>${statusBadge}</div>
-                        <div class="text-[10px] text-slate-400 mt-1">${st.timestamp || '尚未採集'}</div>
-                    </div>
-                </div>
-
-                ${channelsHtml}
-
-                <div class="flex gap-2 border-t pt-3">
-                    <button onclick="triggerStation('${stID}')" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs py-2 rounded font-medium transition">單點手動採集</button>
-                    <button onclick="showHistory('${stID}')" class="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-3 py-2 rounded font-medium border transition">歷史紀錄</button>
-                    <button onclick="deleteStation('${stID}')" class="bg-red-50 hover:bg-red-100 text-red-600 text-xs px-2.5 py-2 rounded font-medium border border-red-200 transition" title="廢止此測站">廢止</button>
-                </div>
-            </div>`;
-            container.insertAdjacentHTML('beforeend', cardHtml);
-        }
-    } catch (e) {
-        console.error('更新測站看板失敗:', e);
-    }
-}
-
-async function deleteStation(stationID) {
-    const confirmed = confirm(`確定要廢止並撤除測站 [${stationID}] 嗎？\n\n注意：此操作會將該卡片從動態看板移除，但過去所有歷史歸檔數據仍會完好保存於 SQLite 資料庫中。`);
-    if (!confirmed) return;
-
-    try {
-        const res = await fetch(`/api/v1/station/delete?station_id=${stationID}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(await res.text());
-        
-        alert(`測站 [${stationID}] 已成功廢止撤除！`);
-        fetchStations();
-    } catch (e) {
-        alert(`廢止失敗: ${e.message}`);
-    }
-}
-
-async function triggerStation(stationID) {
-    try {
-        const res = await fetch(`/api/v1/trigger?station_id=${stationID}`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text());
-        alert(`測站 [${stationID}] 手動採集成功！`);
-        fetchStations();
-    } catch (e) {
-        alert(`採集失敗: ${e.message}`);
-    }
-}
-
-async function updateInterval() {
-    const sec = document.getElementById('pollIntervalSelect').value;
-    const statusSpan = document.getElementById('schedulerStatus');
-
-    await fetch('/api/v1/scheduler/interval', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `seconds=${sec}`
+    ['eoff', 'jac', 'thickness', 'metal_loss', 'eon', 'uac', 'temp'].forEach(key => {
+        ui.ch1[key] = document.getElementById(`ch1_${key}`);
+        ui.ch2[key] = document.getElementById(`ch2_${key}`);
     });
 
-    if (sec === "0") {
-        statusSpan.innerText = "自動採集已停用";
-        statusSpan.className = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600";
-    } else {
-        statusSpan.innerText = "自動採集運作中";
-        statusSpan.className = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800";
+    initChart();
+    fetchStations();
+});
+
+// 1. 取得所有測站清單並填入下拉選單 (對應 /api/data/all)
+async function fetchStations() {
+    try {
+        const res = await fetch(`${API_BASE}/data/all`);
+        const data = await res.json();
+        
+        if (data) {
+            ui.stationSelect.innerHTML = "";
+            const stationIDs = Object.keys(data);
+            if (stationIDs.length === 0) {
+                ui.stationSelect.innerHTML = '<option value="">無可用測站</option>';
+                return;
+            }
+
+            stationIDs.forEach(id => {
+                const opt = document.createElement("option");
+                opt.value = id;
+                opt.textContent = id;
+                ui.stationSelect.appendChild(opt);
+            });
+
+            currentStation = stationIDs[0];
+            ui.currentStationTitle.textContent = currentStation;
+            
+            updateDashboardUI(data[currentStation]);
+            fetchHistoryData();
+            scheduleNextPoll();
+        }
+    } catch (err) {
+        console.error("❌ 無法取得測站列表:", err);
     }
 }
 
-async function showHistory(stationID) {
-    document.getElementById('modalTitle').innerText = `[${stationID}] 歷史歸檔紀錄 (SQLite DB)`;
-    const tbody = document.getElementById('historyTableBody');
-    tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center">載入中...</td></tr>';
-    document.getElementById('historyModal').classList.remove('hidden');
+function scheduleNextPoll() {
+    if (pollTimeout) clearTimeout(pollTimeout);
+    pollTimeout = setTimeout(async () => {
+        if (currentStation) {
+            await fetchLatestData();
+            await fetchHistoryData();
+        }
+        scheduleNextPoll();
+    }, 10000);
+}
+
+function switchStation() {
+    currentStation = ui.stationSelect.value;
+    ui.currentStationTitle.textContent = currentStation;
+    fetchLatestData();
+    fetchHistoryData();
+}
+
+// 3. 取得最新數據 (對應 /api/data/all)
+async function fetchLatestData() {
+    try {
+        const res = await fetch(`${API_BASE}/data/all`);
+        const data = await res.json();
+        if (data && data[currentStation]) {
+            updateDashboardUI(data[currentStation]);
+        }
+    } catch (err) {
+        console.error("❌ 刷新最新數據失敗:", err);
+    }
+}
+
+function formatVal(val, decimals = 2) {
+    return (val !== null && val !== undefined && !isNaN(val)) ? Number(val).toFixed(decimals) : "--";
+}
+
+// 4. 更新前端 UI
+function updateDashboardUI(channels) {
+    if (!channels) return;
+
+    if (channels[1]) {
+        const d = channels[1];
+        ui.ch1.eoff.textContent = formatVal(d.e_off, 3);
+        ui.ch1.jac.textContent = formatVal(d.j_ac, 2);
+        ui.ch1.thickness.textContent = formatVal(d.thickness, 1);
+        ui.ch1.metal_loss.textContent = formatVal(d.metal_loss, 2);
+        ui.ch1.eon.textContent = formatVal(d.e_on, 3);
+        ui.ch1.uac.textContent = formatVal(d.uac, 2);
+        ui.ch1.temp.textContent = formatVal(d.temperature, 1);
+    }
+
+    if (channels[2]) {
+        const d = channels[2];
+        ui.ch2.eoff.textContent = formatVal(d.e_off, 3);
+        ui.ch2.jac.textContent = formatVal(d.j_ac, 2);
+        ui.ch2.thickness.textContent = formatVal(d.thickness, 1);
+        ui.ch2.metal_loss.textContent = formatVal(d.metal_loss, 2);
+        ui.ch2.eon.textContent = formatVal(d.e_on, 3);
+        ui.ch2.uac.textContent = formatVal(d.uac, 2);
+        ui.ch2.temp.textContent = formatVal(d.temperature, 1);
+    }
+
+    ui.lastUpdated.textContent = new Date().toLocaleTimeString();
+}
+
+// 5. 觸發手動探採工作流 (對應 /api/measure)
+async function triggerMeasurement() {
+    if (!currentStation) return;
+
+    ui.btnTrigger.disabled = true;
+    ui.btnTrigger.classList.add("opacity-50", "cursor-not-allowed");
+    ui.btnText.textContent = "⏳ 探採進行中 (約需 30 秒)...";
 
     try {
-        const res = await fetch(`/api/v1/history?station_id=${stationID}&limit=30`);
-        const history = await res.json();
-        tbody.innerHTML = '';
-
-        if (!Array.isArray(history) || history.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-400">目前尚無歷史數據紀錄</td></tr>';
-            return;
-        }
-
-        history.forEach(h => {
-            const ch1 = h.channel_1 || {};
-            const ch2 = h.channel_2 || {};
-            const hasCh2 = ch2 && (ch2.thickness > 0 || ch2.e_off !== 0);
-
-            const row = `<tr class="hover:bg-slate-50 border-b">
-                <td class="p-2 font-mono text-[11px]">${h.timestamp}</td>
-                <td class="p-2">
-                    <div class="font-semibold text-slate-700">Ch1: ${(ch1.thickness ?? 0).toFixed(1)} µm</div>
-                    ${hasCh2 ? `<div class="text-purple-600 text-[10px]">Ch2: ${(ch2.thickness ?? 0).toFixed(1)} µm</div>` : ''}
-                </td>
-                <td class="p-2">
-                    <div>Ch1: ${(ch1.metal_loss ?? 0).toFixed(2)} %</div>
-                    ${hasCh2 ? `<div class="text-purple-600 text-[10px]">Ch2: ${(ch2.metal_loss ?? 0).toFixed(2)} %</div>` : ''}
-                </td>
-                <td class="p-2">
-                    <div>Ch1: ${((ch1.e_off ?? 0) * 1000).toFixed(1)} mV</div>
-                    ${hasCh2 ? `<div class="text-purple-600 text-[10px]">Ch2: ${((ch2.e_off ?? 0) * 1000).toFixed(1)} mV</div>` : ''}
-                </td>
-                <td class="p-2">
-                    <div>Ch1: ${(ch1.j_ac ?? 0).toFixed(2)} A/m²</div>
-                    ${hasCh2 ? `<div class="text-purple-600 text-[10px]">Ch2: ${(ch2.j_ac ?? 0).toFixed(2)} A/m²</div>` : ''}
-                </td>
-                <td class="p-2">${(ch1.temperature ?? 0).toFixed(1)} °C</td>
-            </tr>`;
-            tbody.insertAdjacentHTML('beforeend', row);
+        const res = await fetch(`${API_BASE}/measure`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ station_id: currentStation })
         });
-    } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-red-500">載入歷史紀錄失敗: ${e.message}</td></tr>`;
+        
+        if (res.ok) {
+            let pollCount = 0;
+            const pollStatus = async () => {
+                pollCount++;
+                await fetchLatestData();
+                await fetchHistoryData();
+
+                if (pollCount >= 8) { 
+                    ui.btnTrigger.disabled = false;
+                    ui.btnTrigger.classList.remove("opacity-50", "cursor-not-allowed");
+                    ui.btnText.textContent = "⚡ 立即手動探採";
+                } else {
+                    setTimeout(pollStatus, 5000);
+                }
+            };
+            setTimeout(pollStatus, 5000);
+        } else {
+            const errJson = await res.json();
+            alert(`⚠️ ${errJson.error || "觸發失敗"}`);
+            ui.btnTrigger.disabled = false;
+            ui.btnTrigger.classList.remove("opacity-50", "cursor-not-allowed");
+            ui.btnText.textContent = "⚡ 立即手動探採";
+        }
+    } catch (err) {
+        alert("❌ 網絡連線異常！");
+        ui.btnTrigger.disabled = false;
+        ui.btnTrigger.classList.remove("opacity-50", "cursor-not-allowed");
+        ui.btnText.textContent = "⚡ 立即手動探採";
     }
 }
 
-function closeModal() {
-    document.getElementById('historyModal').classList.add('hidden');
+function initChart() {
+    const ctx = document.getElementById("trendChart").getContext("2d");
+    chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Ch1 Eoff (V)',
+                    data: [],
+                    borderColor: '#34d399',
+                    backgroundColor: 'rgba(52, 211, 153, 0.1)',
+                    yAxisID: 'yEoff',
+                    tension: 0.3
+                },
+                {
+                    label: 'Ch1 剩餘厚度 (µm)',
+                    data: [],
+                    borderColor: '#38bdf8',
+                    backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                    yAxisID: 'yThickness',
+                    tension: 0.3
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#94a3b8' } },
+                yEoff: { type: 'linear', position: 'left', title: { display: true, text: 'Eoff 電位 (V)', color: '#34d399' }, grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#34d399' } },
+                yThickness: { type: 'linear', position: 'right', title: { display: true, text: '厚度 (µm)', color: '#38bdf8' }, grid: { drawOnChartArea: false }, ticks: { color: '#38bdf8' } }
+            },
+            plugins: { legend: { labels: { color: '#f8fafc' } } }
+        }
+    });
 }
 
-setInterval(fetchStations, 5000);
-window.onload = fetchStations;
+// 7. 撈取歷史紀錄並繪圖 (對應 /api/data/history?station=XXX)
+async function fetchHistoryData() {
+    if (!currentStation || !chartInstance) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/data/history?station=${currentStation}`);
+        const data = await res.json();
+
+        if (Array.isArray(data)) {
+            const ch1Logs = data.filter(l => l.channel === 1).reverse();
+            chartInstance.data.labels = ch1Logs.map(l => new Date(l.created_at).toLocaleTimeString());
+            chartInstance.data.datasets[0].data = ch1Logs.map(l => l.e_off);
+            chartInstance.data.datasets[1].data = ch1Logs.map(l => l.thickness);
+            chartInstance.update();
+        }
+    } catch (err) {
+        console.error("❌ 獲取歷史數據失敗:", err);
+    }
+}

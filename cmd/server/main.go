@@ -1,75 +1,98 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"log"
 	"net/http"
-	"sync"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
-
-	"Metricorr_ICL-M_SI/pkg/iclmodbus"
 )
 
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
 func main() {
-	db := NewDatabase("metricorr.db")
-	storage := NewStorage(db)
+	// 支援環境變數作為預設值，提升 Docker / Cloud 部署彈性
+	defaultBroker := getEnv("MQTT_BROKER", "tcp://127.0.0.1:8888")
+	defaultPort := getEnv("HTTP_PORT", ":8083")
+	defaultDB := getEnv("DB_PATH", "metricorr_ICL-M.db")
 
-	broker := StartEmbeddedMQTTBroker(storage)
-	defer broker.Close()
-	time.Sleep(500 * time.Millisecond)
+	brokerURL := flag.String("broker", defaultBroker, "MQTT Broker 位址")
+	httpPort := flag.String("port", defaultPort, "HTTP API 服務 Port")
+	sqlitePath := flag.String("db", defaultDB, "SQLite 資料庫檔案路徑")
+	flag.Parse()
 
-	mqttSvc := NewMQTTService(storage)
+	log.Println("=========================================")
+	log.Println("🚀 啟動 Cathodic Protection 監控服務中...")
+	log.Println("=========================================")
 
-	go startUnattendedAutoScheduler(mqttSvc, storage)
+	// 1. 初始化資料庫
+	storageSvc := NewStorage(*sqlitePath)
 
-	router := NewRouter(mqttSvc, storage, db)
-	listenAddr := "127.0.0.1:8083"
-	log.Printf("[Server] 陰極防蝕無人值守後台 UI 已啟動於: http://%s (請經由 Nginx 代理存取)", listenAddr)
-
-	if err := http.ListenAndServe(listenAddr, router.SetupRoutes()); err != nil {
-		log.Fatalf("[Server] HTTP 服務啟動失敗: %v", err)
+	// 2. 初始化 MQTT 服務
+	mqttSvc, err := NewMQTTService(*brokerURL)
+	if err != nil {
+		log.Fatalf("❌ MQTT 服務初始化失敗: %v", err)
 	}
-}
+	defer mqttSvc.Close()
 
-func startUnattendedAutoScheduler(mqttSvc *MQTTService, storage *Storage) {
-	lastPollTime := time.Time{}
+	// 3. 設定 HTTP 路由與 Web 服務
+	router := SetupRouter(storageSvc, mqttSvc)
 
-	for {
-		time.Sleep(1 * time.Second) // 1 秒輪詢計數器，支援靈活回應 UI 頻率修改
+	srv := &http.Server{
+		Addr:    *httpPort,
+		Handler: router,
+	}
 
-		interval := storage.GetPollInterval()
-		if interval <= 0 {
-			continue
+	// 在 Goroutine 中啟動 HTTP 伺服器
+	go func() {
+		log.Printf("[Server] 🌐 API 伺服器已就緒: http://127.0.0.1%s", *httpPort)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("❌ HTTP 伺服器異常終止: %v", err)
 		}
+	}()
 
-		if time.Since(lastPollTime) < interval {
-			continue
-		}
+	// 4. 動態定時任務：探採資料庫內所有測站
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
 
-		lastPollTime = time.Now()
-		stations := storage.GetStationIDs()
-
-		if len(stations) > 0 {
-			log.Printf("[自動巡檢] 開始採集已註冊測站 (%d 個)...", len(stations))
-			var wg sync.WaitGroup
-			for _, stID := range stations {
-				wg.Add(1)
-				go func(stationID string) {
-					defer wg.Done()
-					cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 72)
-					resp, err := mqttSvc.SendStationCommand(stationID, cmd, 5*time.Second)
-					if err != nil {
-						log.Printf("[自動採集失敗] 測站 %s: %v", stationID, err)
-						return
-					}
-					data, err := iclmodbus.ParseDualChannelResponse(stationID, resp)
-					if err == nil {
-						storage.UpdateStationData(data)
-						log.Printf("[自動採集成功] 測站 %s | Ch1 Eoff: %.3f V | MetalLoss: %.2f%%", stationID, data.Channel1.Eoff, data.Channel1.MetalLoss)
-					}
-				}(stID)
+		for range ticker.C {
+			log.Println("[Server] ⏰ 執行例行定時量測任務...")
+			allStations := storageSvc.GetAllLatestData()
+			for stationID := range allStations {
+				// 透過 storageSvc 實例呼叫 TrySetMeasuring 方法
+				if storageSvc.TrySetMeasuring(stationID, true) {
+					go func(stID string) {
+						defer storageSvc.TrySetMeasuring(stID, false)
+						ExecuteMeasurementWorkflow(stID, mqttSvc, storageSvc)
+					}(stationID)
+				}
 			}
-			wg.Wait()
 		}
-	}
-}
+	}()
 
+	// 5. 監聽關機訊號實作 Graceful Shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("[Server] 🛑 收到關機訊號，啟動安全關機流程...")
+
+	// 給予 5 秒時間處理未完成的 HTTP 請求
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("❌ HTTP Server 強制關機: %v", err)
+	}
+
+	log.Println("[Server] 🟢 服務已安全結束。")
+}

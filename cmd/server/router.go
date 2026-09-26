@@ -2,138 +2,95 @@ package main
 
 import (
 	"embed"
-	"encoding/json"
 	"io/fs"
 	"net/http"
-	"strconv"
-	"time"
 
-	"Metricorr_ICL-M_SI/pkg/iclmodbus"
+	"github.com/gin-gonic/gin"
 )
 
 //go:embed web/*
 var webFiles embed.FS
 
-type Router struct {
-	mqtt    *MQTTService
-	storage *Storage
-	db      *Database
-}
+// SetupRouter 初始化並設定 Gin 路由與靜態資源
+func SetupRouter(storage *Storage, mqttSvc *MQTTService) *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.Default()
 
-func NewRouter(mqtt *MQTTService, storage *Storage, db *Database) *Router {
-	return &Router{mqtt: mqtt, storage: storage, db: db}
-}
-
-func (rt *Router) SetupRoutes() http.Handler {
-	mux := http.NewServeMux()
-
-	// API 1: 取得所有測站最新狀態
-	mux.HandleFunc("/api/v1/stations", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rt.storage.GetAllStationsData())
+	// 允許跨域請求 (CORS)
+	r.Use(func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
 	})
 
-	// API 2: 單點手動觸發採集 /api/v1/trigger?station_id=ST-KHH-01
-	mux.HandleFunc("/api/v1/trigger", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost && r.Method != http.MethodGet {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		stationID := r.URL.Query().Get("station_id")
-		if stationID == "" {
-			http.Error(w, "缺少 station_id 參數", http.StatusBadRequest)
-			return
-		}
-
-		cmd := iclmodbus.BuildReadHoldingRegisters(0x01, 1219, 72)
-		resp, err := rt.mqtt.SendStationCommand(stationID, cmd, 5*time.Second)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		data, err := iclmodbus.ParseDualChannelResponse(stationID, resp)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		rt.storage.UpdateStationData(data)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
-	})
-
-	// API 3: 設定無人值守自動輪詢頻率
-	mux.HandleFunc("/api/v1/scheduler/interval", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		secondsStr := r.FormValue("seconds")
-		sec, err := strconv.Atoi(secondsStr)
-		if err != nil || sec < 0 {
-			http.Error(w, "無效的 seconds 參數", http.StatusBadRequest)
-			return
-		}
-
-		newDuration := time.Duration(sec) * time.Second
-		rt.storage.SetPollInterval(newDuration)
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "success",
-			"interval": sec,
+	// 靜態檔案服務 (使用內嵌檔案系統)
+	subFS, err := fs.Sub(webFiles, "web")
+	if err == nil {
+		r.StaticFS("/web", http.FS(subFS))
+		r.GET("/", func(c *gin.Context) {
+			c.FileFromFS("index.html", http.FS(subFS))
 		})
-	})
+	}
 
-	// API 4: 取得 SQLite 歷史數據
-	mux.HandleFunc("/api/v1/history", func(w http.ResponseWriter, r *http.Request) {
-		stationID := r.URL.Query().Get("station_id")
-		limitStr := r.URL.Query().Get("limit")
-		limit := 30
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
-		}
+	// RESTful API 路由配置
+	api := r.Group("/api")
+	{
+		// 取得單一測站最新數據
+		api.GET("/data/latest", func(c *gin.Context) {
+			stationID := c.DefaultQuery("station", "STATION-001")
+			data, found := storage.GetLatestData(stationID)
+			if !found {
+				c.JSON(http.StatusNotFound, gin.H{"error": "尚未取得測站數據"})
+				return
+			}
+			c.JSON(http.StatusOK, data)
+		})
 
-		history, err := rt.db.GetHistory(stationID, limit)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(history)
-	})
+		// 取得所有測站最新狀態
+		api.GET("/data/all", func(c *gin.Context) {
+			c.JSON(http.StatusOK, storage.GetAllLatestData())
+		})
 
-	// API 5: 查詢連線網關動態狀態
-	mux.HandleFunc("/api/v1/gateways", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rt.storage.GetGatewaysStatus())
-	})
+		// 取得歷史趨勢數據
+		api.GET("/data/history", func(c *gin.Context) {
+			stationID := c.DefaultQuery("station", "STATION-001")
+			c.JSON(http.StatusOK, storage.GetHistory(stationID))
+		})
 
-	// 在路由註冊區域 (mux.HandleFunc) 加入以下接口：
-	mux.HandleFunc("/api/v1/station/delete", func(w http.ResponseWriter, req *http.Request) {
-		if req.Method != http.MethodDelete && req.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		// 手動觸發量測工作流
+		api.POST("/measure", func(c *gin.Context) {
+			var req struct {
+				StationID string `json:"station_id"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil || req.StationID == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "請提供有效的 station_id"})
+				return
+			}
 
-		stationID := req.URL.Query().Get("station_id")
-		if stationID == "" {
-			http.Error(w, "Missing station_id", http.StatusBadRequest)
-			return
-		}
+			// 防重複執行鎖檢查（正確使用 storage 實例呼叫 TrySetMeasuring）
+			if !storage.TrySetMeasuring(req.StationID, true) {
+				c.JSON(http.StatusConflict, gin.H{"error": "該測站正處於量測程序中，請稍後再試"})
+				return
+			}
 
-		// 💡 修正點：使用 r.storage 調用 RemoveStation
-		rt.storage.RemoveStation(stationID)
+			// 異步啟動量測任務
+			go func() {
+				defer storage.TrySetMeasuring(req.StationID, false)
+				ExecuteMeasurementWorkflow(req.StationID, mqttSvc, storage)
+			}()
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"success","message":"測站已成功廢止撤除"}`))
-	})
+			c.JSON(http.StatusOK, gin.H{
+				"status":     "accepted",
+				"message":    "已成功啟動量測程序",
+				"station_id": req.StationID,
+			})
+		})
+	}
 
-	// 內嵌靜態 Web 頁面
-	webFS, _ := fs.Sub(webFiles, "web")
-	mux.Handle("/", http.FileServer(http.FS(webFS)))
-
-	return mux
+	return r
 }
