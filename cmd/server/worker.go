@@ -9,26 +9,19 @@ import (
 )
 
 func ExecuteMeasurementWorkflow(stationID string, mqttClient *MQTTService, storage *Storage) {
-	// ------------------------------------------------------------------
-	// 1. 【防護優化】檢查並設定「探採中」鎖，防止多個 Goroutine 同時操作 RS485
-	// ------------------------------------------------------------------
-	if storage != nil && !storage.TrySetMeasuring(stationID, true) {
-		log.Printf("[%s] ⚠️ 該測站已在探採程序中，忽略本次重複觸發請求", stationID)
-		return
-	}
-	// 利用 defer 確保無論工作流成功、失敗或中途退出，離場時一律解鎖
-	if storage != nil {
-		defer storage.TrySetMeasuring(stationID, false)
-	}
+	// 注意：這裡已移除 TrySetMeasuring 的重複上鎖，因外部呼叫前皆已上鎖並安排 defer 解鎖
 
 	// ------------------------------------------------------------------
 	// 階段一：發送探採啟動指令 (Reg 1199 = 1)
 	// ------------------------------------------------------------------
 	log.Printf("[%s] 🚀 1. 發送探採指令 (Reg 1199 = 1)...", stationID)
 	cmdTrigger := iclmodbus.BuildTriggerMeasurementCmd(0x01)
+
+	// 加入這行來印出 Hex String
+	log.Printf("[%s] 實際下發的 Modbus Hex: %X", stationID, cmdTrigger)
+
 	_, err := mqttClient.SendStationCommand(stationID, cmdTrigger, 3*time.Second)
 	if err != nil {
-		// 【優化】如果網關無回應或發射失敗，即刻退出，不進行無效的 90 秒輪詢
 		log.Printf("[%s] ❌ 發送探採指令失敗 (網關無回應或連線中斷): %v", stationID, err)
 		return
 	}
@@ -50,8 +43,6 @@ func ExecuteMeasurementWorkflow(stationID string, mqttClient *MQTTService, stora
 			continue
 		}
 
-		// Modbus RTU 讀取響應格式：[SlaveID, Func, ByteCount, HighByte, LowByte, CRC, CRC]
-		// statusVal 正確對應 respStatus[3:5] (Reg 1200 數值)
 		statusVal := binary.BigEndian.Uint16(respStatus[3:5])
 		log.Printf("[%s] 📊 當前探採狀態碼: %d", stationID, statusVal)
 
@@ -61,7 +52,7 @@ func ExecuteMeasurementWorkflow(stationID string, mqttClient *MQTTService, stora
 			break
 		} else if statusVal == 4 || statusVal == 5 { // 4 = Failed, 5 = HW Error
 			log.Printf("[%s] ❌ 探採設備回報錯誤碼: %d", stationID, statusVal)
-			return // defer 會自動觸發解鎖
+			return
 		}
 	}
 

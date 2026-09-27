@@ -1,4 +1,3 @@
-// 自動偵測當前 Server API Host，匹配 router.go 的路由
 const API_BASE = `${window.location.protocol}//${window.location.host}/api`;
 
 let currentStation = "";
@@ -29,36 +28,76 @@ document.addEventListener("DOMContentLoaded", () => {
 
     initChart();
     fetchStations();
+    initSSE(); // 啟動即時事件監聽 (SSE)
 });
 
-// 1. 取得所有測站清單並填入下拉選單 (對應 /api/data/all)
+// 啟用 SSE 即時監聽：網關連線/斷線時立即可見
+function initSSE() {
+    if (!window.EventSource) return;
+
+    const eventSource = new EventSource(`${API_BASE}/stations/events`);
+
+    eventSource.addEventListener("online_update", (e) => {
+        try {
+            const stationIDs = JSON.parse(e.data);
+            updateStationDropdown(stationIDs);
+        } catch (err) {
+            console.error("解析 SSE 數據失敗:", err);
+        }
+    });
+
+    eventSource.onerror = (err) => {
+        console.warn("⚠️ SSE 連線中斷，嘗試自動重連中...");
+    };
+}
+
+// 🌟【修改】：更新網關下拉選單與燈號指示邏輯
+function updateStationDropdown(stationIDs) {
+    const indicator = document.getElementById("statusIndicator");
+
+    // 🔴 情況 A：無網關連線 (全數離線)
+    if (!stationIDs || stationIDs.length === 0) {
+        ui.stationSelect.innerHTML = '<option value="">無線上網關</option>';
+        currentStation = "";
+        ui.currentStationTitle.textContent = "網關離線";
+        if (indicator) {
+            indicator.className = "w-3.5 h-3.5 rounded-full bg-rose-500 shadow-lg shadow-rose-500/50 animate-pulse"; // 亮紅燈
+        }
+        return;
+    }
+
+    // 🟢 情況 B：至少有一個網關在線
+    const previousSelected = currentStation;
+    ui.stationSelect.innerHTML = "";
+
+    stationIDs.forEach(id => {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = id + " (🟢 在線)";
+        ui.stationSelect.appendChild(opt);
+    });
+
+    if (stationIDs.includes(previousSelected)) {
+        ui.stationSelect.value = previousSelected;
+    } else {
+        currentStation = stationIDs[0];
+        ui.stationSelect.value = currentStation;
+        ui.currentStationTitle.textContent = currentStation;
+        fetchLatestData();
+        fetchHistoryData();
+    }
+
+    if (indicator) {
+        indicator.className = "w-3.5 h-3.5 rounded-full bg-emerald-500 shadow-lg shadow-emerald-500/50 animate-pulse"; // 亮綠燈
+    }
+}
+
 async function fetchStations() {
     try {
-        const res = await fetch(`${API_BASE}/data/all`);
-        const data = await res.json();
-        
-        if (data) {
-            ui.stationSelect.innerHTML = "";
-            const stationIDs = Object.keys(data);
-            if (stationIDs.length === 0) {
-                ui.stationSelect.innerHTML = '<option value="">無可用測站</option>';
-                return;
-            }
-
-            stationIDs.forEach(id => {
-                const opt = document.createElement("option");
-                opt.value = id;
-                opt.textContent = id;
-                ui.stationSelect.appendChild(opt);
-            });
-
-            currentStation = stationIDs[0];
-            ui.currentStationTitle.textContent = currentStation;
-            
-            updateDashboardUI(data[currentStation]);
-            fetchHistoryData();
-            scheduleNextPoll();
-        }
+        const resOnline = await fetch(`${API_BASE}/stations/online`);
+        const stationIDs = await resOnline.json();
+        updateStationDropdown(stationIDs);
+        scheduleNextPoll();
     } catch (err) {
         console.error("❌ 無法取得測站列表:", err);
     }
@@ -77,15 +116,15 @@ function scheduleNextPoll() {
 
 function switchStation() {
     currentStation = ui.stationSelect.value;
-    ui.currentStationTitle.textContent = currentStation;
+    ui.currentStationTitle.textContent = currentStation || "網關離線";
     fetchLatestData();
     fetchHistoryData();
 }
 
-// 3. 取得最新數據 (對應 /api/data/all)
 async function fetchLatestData() {
+    if (!currentStation) return;
     try {
-        const res = await fetch(`${API_BASE}/data/all`);
+        const res = await fetch(`${API_BASE}/stations/data/all`);
         const data = await res.json();
         if (data && data[currentStation]) {
             updateDashboardUI(data[currentStation]);
@@ -99,7 +138,6 @@ function formatVal(val, decimals = 2) {
     return (val !== null && val !== undefined && !isNaN(val)) ? Number(val).toFixed(decimals) : "--";
 }
 
-// 4. 更新前端 UI
 function updateDashboardUI(channels) {
     if (!channels) return;
 
@@ -128,7 +166,6 @@ function updateDashboardUI(channels) {
     ui.lastUpdated.textContent = new Date().toLocaleTimeString();
 }
 
-// 5. 觸發手動探採工作流 (對應 /api/measure)
 async function triggerMeasurement() {
     if (!currentStation) return;
 
@@ -137,14 +174,13 @@ async function triggerMeasurement() {
     ui.btnText.textContent = "⏳ 探採進行中 (約需 30 秒)...";
 
     try {
-        const res = await fetch(`${API_BASE}/measure`, {
+        const res = await fetch(`${API_BASE}/stations/${currentStation}/measure`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ station_id: currentStation })
+            }
         });
-        
+
         if (res.ok) {
             let pollCount = 0;
             const pollStatus = async () => {
@@ -152,7 +188,7 @@ async function triggerMeasurement() {
                 await fetchLatestData();
                 await fetchHistoryData();
 
-                if (pollCount >= 8) { 
+                if (pollCount >= 8) {
                     ui.btnTrigger.disabled = false;
                     ui.btnTrigger.classList.remove("opacity-50", "cursor-not-allowed");
                     ui.btnText.textContent = "⚡ 立即手動探採";
@@ -214,12 +250,11 @@ function initChart() {
     });
 }
 
-// 7. 撈取歷史紀錄並繪圖 (對應 /api/data/history?station=XXX)
 async function fetchHistoryData() {
     if (!currentStation || !chartInstance) return;
 
     try {
-        const res = await fetch(`${API_BASE}/data/history?station=${currentStation}`);
+        const res = await fetch(`${API_BASE}/stations/${currentStation}/data/history`);
         const data = await res.json();
 
         if (Array.isArray(data)) {

@@ -24,92 +24,67 @@ func getEnv(key, fallback string) string {
 }
 
 func main() {
-	// 支援環境變數作為預設值，預設 Broker 本地端 Port 為 8888，HTTP API 服務 Port 為 8083，SQLite 資料庫檔案預設為 metricorr_ICL-M.db
 	defaultBrokerPort := getEnv("MQTT_PORT", ":8888")
 	defaultHttpPort := getEnv("HTTP_PORT", ":8083")
 	defaultDB := getEnv("DB_PATH", "metricorr_ICL-M.db")
 
-	brokerPort := flag.String("mqtt-port", defaultBrokerPort, "內嵌 MQTT Broker 監聽的 Port")
+	brokerPort := flag.String("mqtt-port", defaultBrokerPort, "內嵌 MQTT Broker 監聽 Port")
 	httpPort := flag.String("port", defaultHttpPort, "HTTP API 服務 Port")
 	sqlitePath := flag.String("db", defaultDB, "SQLite 資料庫檔案路徑")
 	flag.Parse()
 
 	clientBrokerURL := fmt.Sprintf("tcp://127.0.0.1%s", *brokerPort)
 	log.Println("=========================================")
+	log.Println("🚀 啟動 Cathodic Protection 陰極防蝕監控服務中...")
+	log.Println("=========================================")
 
-	log.Println("=========================================")
-	log.Println("🚀 啟動 Cathodic Protection 監控服務中...")
-	log.Println("=========================================")
+	// 1. 初始化資料庫與存儲層
+	storageSvc := NewStorage(*sqlitePath)
 
 	// ========================================================
-	// [階段 1] 啟動內嵌 MQTT Broker (Mochi-MQTT)
+	// [階段 1] 啟動模組化內嵌 MQTT Broker (Mochi-MQTT)
 	// ========================================================
 	broker := mochi.New(nil)
 
-	// 【測試階段】掛載 AllowHook，允許所有匿名連線 (不需帳號密碼)
+	// 載入基本認證 Hook (可依需求改為自訂認證)
 	if err := broker.AddHook(new(auth.AllowHook), nil); err != nil {
-		log.Fatalf("❌ 無法加入允許連線設定: %v", err)
+		log.Fatalf("❌ 無法載入權限管理 Hook: %v", err)
 	}
 
-	// 【未來擴充】帳號密碼權限機制 (目前先註解，未來需啟用時解開即可)
-	/*
-		err := broker.AddHook(new(auth.Hook), &auth.Options{
-			Ledger: &auth.Ledger{
-				Auth: auth.AuthRules{
-					{
-						Username: "device_gateway",
-						Password: "secret_password",
-						Allow:    true,
-					},
-					{
-						Username: "server_admin", // 這是後端 Client 連線要用的帳號
-						Password: "admin_password",
-						Allow:    true,
-					},
-				},
-			},
-		})
-		if err != nil {
-			log.Fatalf("❌ 無法加入帳密權限設定: %v", err)
-		}
-	*/
+	// 🌟 載入模組化 RMU 連線監聽 Hook (注入自訂或預設的 GatewayIdentifier)
+	rmuHook := NewClientLoggerHook(storageSvc, DefaultGatewayIdentifier)
+	if err := broker.AddHook(rmuHook, nil); err != nil {
+		log.Fatalf("❌ 掛載 RMU 連線監聽 Hook 失敗: %v", err)
+	}
 
-	// 設定 Broker 監聽本地 TCP Port
 	tcpListener := listeners.NewTCP(listeners.Config{
-		ID:      "t1",
+		ID:      "rmu-tcp-listener",
 		Address: *brokerPort,
 	})
 	if err := broker.AddListener(tcpListener); err != nil {
-		log.Fatalf("❌ 無法建立 TCP 監聽: %v", err)
+		log.Fatalf("❌ 無法建立 TCP 監聽器: %v", err)
 	}
 
-	// 在背景啟動 Broker
 	go func() {
 		if err := broker.Serve(); err != nil {
-			log.Fatalf("❌ Broker 運行失敗: %v", err)
+			log.Fatalf("❌ Broker 運行異常: %v", err)
 		}
 	}()
 
-	time.Sleep(1 * time.Second) // 稍微等待確保 Broker 啟動完成
-	log.Printf("[Broker] 🟢 內嵌 MQTT Broker 已成功啟動於 %s (允許無帳密連線)", *brokerPort)
+	time.Sleep(1 * time.Second)
+	log.Printf("[Broker] 🟢 內嵌 MQTT Broker 已啟動於 %s", *brokerPort)
 
 	// ========================================================
-	// [階段 2] 啟動您的 Web 伺服器與後端業務邏輯
+	// [階段 2] 啟動 Core MQTT 通訊服務與 Web API
 	// ========================================================
 
-	// 1. 初始化資料庫
-	storageSvc := NewStorage(*sqlitePath)
-
-	// 2. 初始化 MQTT 客戶端服務 (連線至剛剛啟動的本地 Broker)
-	// 💡 注意：未來若啟用帳號密碼，請到 cmd/server/broker.go 內的 NewMQTTService，
-	// 加入 opts.SetUsername("server_admin") 與 opts.SetPassword("admin_password")
-	mqttSvc, err := NewMQTTService(clientBrokerURL)
+	mqttSvc, err := NewMQTTService(clientBrokerURL, storageSvc)
 	if err != nil {
-		log.Fatalf("❌ MQTT 服務初始化失敗: %v", err)
+		log.Fatalf("❌ MQTT Core 服務初始化失敗: %v", err)
 	}
 	defer mqttSvc.Close()
 
-	// 3. 設定 HTTP 路由與 Web 服務
+	// 設定 Web API 路由
 	router := SetupRouter(storageSvc, mqttSvc)
 
 	srv := &http.Server{
@@ -117,7 +92,6 @@ func main() {
 		Handler: router,
 	}
 
-	// 在 Goroutine 中啟動 HTTP 伺服器
 	go func() {
 		log.Printf("[Server] 🌐 API 伺服器已就緒: http://127.0.0.1%s", *httpPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -125,13 +99,13 @@ func main() {
 		}
 	}()
 
-	// 4. 動態定時任務：每小時自動探採一次所有測站
+	// 4. 定時工作流 (預設 1 小時輪詢全網關) !!!!!! 非常重要內定設定
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(1 * time.Minute) // 每 1 分鐘觸發一次 (可依需求調整)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			log.Println("[Server] ⏰ 執行例行定時量測任務...")
+			log.Println("[Server] ⏰ 觸發例行全區測站探採任務...")
 			allStations := storageSvc.GetAllLatestData()
 			for stationID := range allStations {
 				if storageSvc.TrySetMeasuring(stationID, true) {
@@ -151,9 +125,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[Server] 🛑 收到關機訊號，啟動安全關機流程...")
+	log.Println("[Server] 🛑 收到關機指令，安全清理資源中...")
 
-	// 給予 5 秒時間處理未完成的 HTTP 請求
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -161,8 +134,6 @@ func main() {
 		log.Printf("❌ HTTP Server 強制關機: %v", err)
 	}
 
-	// 關閉內嵌的 Broker
 	broker.Close()
-
-	log.Println("[Server] 🟢 服務已安全結束。")
+	log.Println("[Server] 🟢 所有服務已完全停止。")
 }

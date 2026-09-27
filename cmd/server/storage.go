@@ -2,8 +2,8 @@ package main
 
 import (
 	"log"
-	"time"
 	"sync"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -33,12 +33,12 @@ type MeasurementLog struct {
 }
 
 type Storage struct {
-	db *gorm.DB
-	measuringMap sync.Map
+	db             *gorm.DB
+	measuringMap   sync.Map
+	onlineStations sync.Map // 存放已上線測站清單 (Key: stationID)
 }
 
 func NewStorage(dbPath string) *Storage {
-	// 開啟 SQLite WAL 高效能併發讀寫模式 + Busy Timeout 5 秒
 	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
@@ -51,6 +51,27 @@ func NewStorage(dbPath string) *Storage {
 
 	log.Printf("🟢 SQLite 資料庫載入完成 (WAL 模式啟動): %s", dbPath)
 	return &Storage{db: db}
+}
+
+// 🌟【新增】：由 Broker Hook 呼叫，即時更新網關在線/離線狀態
+func (s *Storage) SetStationStatus(stationID string, online bool) {
+	if online {
+		s.onlineStations.Store(stationID, time.Now())
+		log.Printf("🟢 [Storage] 測站 [%s] 狀態標記: 在線", stationID)
+	} else {
+		s.onlineStations.Delete(stationID)
+		log.Printf("🔴 [Storage] 測站 [%s] 狀態標記: 離線", stationID)
+	}
+}
+
+// 取得所有目前線上測站
+func (s *Storage) GetOnlineStations() []string {
+	var list []string
+	s.onlineStations.Range(func(key, value interface{}) bool {
+		list = append(list, key.(string))
+		return true
+	})
+	return list
 }
 
 func (s *Storage) SaveMeasurementData(stationID string, ch1, ch2 *iclmodbus.ChannelMetrics) {
@@ -83,9 +104,9 @@ func (s *Storage) GetAllLatestData() map[string]map[int]MeasurementLog {
 	for _, id := range stationIDs {
 		result[id] = make(map[int]MeasurementLog)
 		for ch := 1; ch <= 2; ch++ {
-			var log MeasurementLog
-			if err := s.db.Where("station_id = ? AND channel = ?", id, ch).Order("created_at desc").First(&log).Error; err == nil {
-				result[id][ch] = log
+			var logData MeasurementLog
+			if err := s.db.Where("station_id = ? AND channel = ?", id, ch).Order("created_at desc").First(&logData).Error; err == nil {
+				result[id][ch] = logData
 			}
 		}
 	}
@@ -121,15 +142,14 @@ func convertToModel(stationID string, channel int, m *iclmodbus.ChannelMetrics, 
 }
 
 func (s *Storage) TrySetMeasuring(stationID string, measuring bool) bool {
-    if measuring {
-        _, loaded := s.measuringMap.LoadOrStore(stationID, true)
-        return !loaded // 如果原本沒有，回傳 true (鎖定成功)；若原本已有，回傳 false (已被鎖定)
-    }
-    s.measuringMap.Delete(stationID)
-    return true
+	if measuring {
+		_, loaded := s.measuringMap.LoadOrStore(stationID, true)
+		return !loaded
+	}
+	s.measuringMap.Delete(stationID)
+	return true
 }
 
-// GetLatestData 取得特定測站 Ch1 與 Ch2 的最新筆數據
 func (s *Storage) GetLatestData(stationID string) (map[int]MeasurementLog, bool) {
 	result := make(map[int]MeasurementLog)
 	for ch := 1; ch <= 2; ch++ {

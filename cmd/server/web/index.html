@@ -1,15 +1,13 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>金茂企業 Metricorr ICL-M 陰極防蝕與腐蝕監控平台</title>
+  <title>KM企業 Metricorr ICL-M 陰極防蝕與腐蝕監控平台</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Chart.js 繪圖庫 -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen">
 
@@ -17,7 +15,7 @@
   <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
     <div class="flex items-center space-x-3">
       <div class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
-      <h1 class="text-xl font-bold text-white tracking-wide">Metricorr ICL-M 遠端監控後台</h1>
+      <h1 class="text-xl font-bold text-white tracking-wide">KM企業 Metricorr ICL-M 遠端監控平台</h1>
     </div>
     <div class="flex items-center space-x-4">
       <select id="stationSelect" onchange="switchStation()" class="bg-slate-700 text-white text-sm rounded px-3 py-1.5 border border-slate-600 focus:outline-none focus:border-emerald-500">
@@ -34,9 +32,13 @@
 
     <!-- 狀態警示與時間標籤 -->
     <div class="flex justify-between items-center bg-slate-800/60 p-4 rounded-lg border border-slate-700">
-      <div>
-        <span class="text-xs text-slate-400 block">當前選取測站</span>
-        <span id="currentStationTitle" class="text-lg font-bold text-emerald-400">STATION-001</span>
+      <div class="flex items-center space-x-3">
+        <!-- 🌟【新增】：網關連線動態指示燈 (綠燈: 在線, 紅燈: 離線) -->
+        <span id="statusIndicator" class="w-3.5 h-3.5 rounded-full bg-slate-500 shadow"></span>
+        <div>
+          <span class="text-xs text-slate-400 block">當前選取測站</span>
+          <span id="currentStationTitle" class="text-lg font-bold text-emerald-400">尚未選取</span>
+        </div>
       </div>
       <div class="text-right">
         <span class="text-xs text-slate-400 block">最後更新時間</span>
@@ -44,7 +46,7 @@
       </div>
     </div>
 
-    <!-- 探針通道 1 與 通道 2 關鍵指標卡片 -->
+    <!-- 探頭通道 1 與 通道 2 關鍵指標卡片 -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
       <!-- Channel 1 卡片 -->
@@ -54,7 +56,7 @@
             <span class="w-2.5 h-2.5 rounded-full bg-blue-400"></span>
             <span>Channel 1 (ER Probe 1)</span>
           </h2>
-          <span class="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">試片通道</span>
+          <span class="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">探頭試片Channel</span>
         </div>
 
         <div class="grid grid-cols-2 gap-4 text-sm">
@@ -67,7 +69,7 @@
             <div class="text-xl font-bold font-mono text-amber-400 mt-1"><span id="ch1_jac">--</span> <span class="text-xs text-slate-400">A/m²</span></div>
           </div>
           <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
-            <span class="text-xs text-slate-400">探針剩餘厚度</span>
+            <span class="text-xs text-slate-400">探頭試片剩餘厚度</span>
             <div class="text-xl font-bold font-mono text-sky-400 mt-1"><span id="ch1_thickness">--</span> <span class="text-xs text-slate-400">µm</span></div>
           </div>
           <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
@@ -90,7 +92,7 @@
             <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
             <span>Channel 2 (ER Probe 2)</span>
           </h2>
-          <span class="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">管道/參考通道</span>
+          <span class="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">探頭試片Channel</span>
         </div>
 
         <div class="grid grid-cols-2 gap-4 text-sm">
@@ -103,7 +105,7 @@
             <div class="text-xl font-bold font-mono text-amber-400 mt-1"><span id="ch2_jac">--</span> <span class="text-xs text-slate-400">A/m²</span></div>
           </div>
           <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
-            <span class="text-xs text-slate-400">探針剩餘厚度</span>
+            <span class="text-xs text-slate-400">探頭試片剩餘厚度</span>
             <div class="text-xl font-bold font-mono text-sky-400 mt-1"><span id="ch2_thickness">--</span> <span class="text-xs text-slate-400">µm</span></div>
           </div>
           <div class="bg-slate-900/50 p-3 rounded border border-slate-700/50">
@@ -123,7 +125,7 @@
 
     <!-- 歷史數據趨勢圖表 -->
     <div class="bg-slate-800 rounded-xl p-5 border border-slate-700 shadow-lg">
-      <h3 class="font-bold text-white mb-4">陰極防蝕 Eoff 電位與探針厚度變化趨勢</h3>
+      <h3 class="font-bold text-white mb-4">陰極防蝕 Eoff 電位與探頭試片厚度變化趨勢</h3>
       <div class="h-72 w-full">
         <canvas id="trendChart"></canvas>
       </div>

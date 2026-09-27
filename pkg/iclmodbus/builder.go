@@ -5,24 +5,44 @@ import (
 	"math"
 )
 
+// BuildReadHoldingRegistersCmd 通用 Modbus 讀取 (Func 03)
+func BuildReadHoldingRegistersCmd(slaveID byte, regAddress uint16, length uint16) []byte {
+	payload := make([]byte, 6)
+	payload[0] = slaveID
+	payload[1] = 0x03
+	binary.BigEndian.PutUint16(payload[2:4], regAddress)
+	binary.BigEndian.PutUint16(payload[4:6], length)
+	return AppendCRC(payload)
+}
+
+// BuildWriteSingleRegisterCmd 通用 Modbus 寫入單一暫存器 (Func 06)
+func BuildWriteSingleRegisterCmd(slaveID byte, regAddress uint16, value uint16) []byte {
+	payload := make([]byte, 6)
+	payload[0] = slaveID
+	payload[1] = 0x06
+	binary.BigEndian.PutUint16(payload[2:4], regAddress)
+	binary.BigEndian.PutUint16(payload[4:6], value)
+	return AppendCRC(payload)
+}
+
 // 1. 觸發探採指令 (Reg 1199 = 1)
 func BuildTriggerMeasurementCmd(slaveID byte) []byte {
-	return AppendCRC([]byte{slaveID, 0x06, 0x04, 0xAF, 0x00, 0x01})
+	return BuildWriteSingleRegisterCmd(slaveID, 1199, 1)
 }
 
 // 2. 讀取探採狀態指令 (Reg 1200, Len 1)
 func BuildReadStatusCmd(slaveID byte) []byte {
-	return AppendCRC([]byte{slaveID, 0x03, 0x04, 0xB0, 0x00, 0x01})
+	return BuildReadHoldingRegistersCmd(slaveID, 1200, 1)
 }
 
 // 3. 讀取 Ch1 數據指令 (Reg 1219, Len 28)
 func BuildReadCh1Cmd(slaveID byte) []byte {
-	return AppendCRC([]byte{slaveID, 0x03, 0x04, 0xC3, 0x00, 0x1C})
+	return BuildReadHoldingRegistersCmd(slaveID, 1219, 28)
 }
 
 // 4. 讀取 Ch2 數據指令 (Reg 1263, Len 28)
 func BuildReadCh2Cmd(slaveID byte) []byte {
-	return AppendCRC([]byte{slaveID, 0x03, 0x04, 0xEF, 0x00, 0x1C})
+	return BuildReadHoldingRegistersCmd(slaveID, 1263, 28)
 }
 
 type ChannelMetrics struct {
@@ -44,7 +64,7 @@ type ChannelMetrics struct {
 
 // 解析 Modbus 功能碼 03 回應 (長度需 >= 59 Bytes)
 func ParseChannelData(payload []byte) *ChannelMetrics {
-// 完整封包: Header(3) + Data(56) + CRC(2) = 61 Bytes
+	// 完整封包: Header(3) + Data(56) + CRC(2) = 61 Bytes
 	if len(payload) < 61 || payload[1] >= 0x80 || payload[2] != 56 {
 		return nil
 	}
