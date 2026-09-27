@@ -46,12 +46,10 @@ func main() {
 	// ========================================================
 	broker := mochi.New(nil)
 
-	// 載入基本認證 Hook (可依需求改為自訂認證)
 	if err := broker.AddHook(new(auth.AllowHook), nil); err != nil {
 		log.Fatalf("❌ 無法載入權限管理 Hook: %v", err)
 	}
 
-	// 🌟 載入模組化 RMU 連線監聽 Hook (注入自訂或預設的 GatewayIdentifier)
 	rmuHook := NewClientLoggerHook(storageSvc, DefaultGatewayIdentifier)
 	if err := broker.AddHook(rmuHook, nil); err != nil {
 		log.Fatalf("❌ 掛載 RMU 連線監聽 Hook 失敗: %v", err)
@@ -84,7 +82,6 @@ func main() {
 	}
 	defer mqttSvc.Close()
 
-	// 設定 Web API 路由
 	router := SetupRouter(storageSvc, mqttSvc)
 
 	srv := &http.Server{
@@ -99,15 +96,22 @@ func main() {
 		}
 	}()
 
-	// 4. 定時工作流 (預設 1 小時輪詢全網關) !!!!!! 非常重要內定設定
+	// 💡 【修正】：定時工作流僅對當前「線上」網關發送探採指令
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute) // 每 1 分鐘觸發一次 (可依需求調整)
+		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 
 		for range ticker.C {
 			log.Println("[Server] ⏰ 觸發例行全區測站探採任務...")
-			allStations := storageSvc.GetAllLatestData()
-			for stationID := range allStations {
+			
+			// 僅抓取通過線上與逾時過濾的網關
+			onlineStations := storageSvc.GetOnlineStations()
+			if len(onlineStations) == 0 {
+				log.Println("[Server] ℹ️ 當前無任何線上網關，跳過本輪探採")
+				continue
+			}
+
+			for _, stationID := range onlineStations {
 				if storageSvc.TrySetMeasuring(stationID, true) {
 					go func(stID string) {
 						defer storageSvc.TrySetMeasuring(stID, false)

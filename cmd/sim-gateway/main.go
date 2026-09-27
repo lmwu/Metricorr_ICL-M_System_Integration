@@ -31,7 +31,7 @@ func main() {
 	var sharedMutex sync.Mutex
 	var err error
 
-	// 1. 若有指定實體 COM Port，由主程序統一開啟一次，避免多個 Worker 搶佔同一埠號導致崩潰
+	// 1. 若有指定實體 COM Port，由主程序統一開啟一次
 	if *portName != "" {
 		mode := &serial.Mode{
 			BaudRate: *baudRate,
@@ -49,7 +49,7 @@ func main() {
 		log.Println("🤖 未指定實體串口 (-port)，全數測站啟用軟體 Mock 模式")
 	}
 
-	// 2. 為每個測站啟動獨立的 MQTT Worker 協程 (共享同一 RS485 實體線路與 Mutex 鎖)
+	// 2. 為每個測站啟動獨立的 MQTT Worker 協程
 	stations := strings.Split(*stationFlag, ",")
 	for _, stationID := range stations {
 		stationID = strings.TrimSpace(stationID)
@@ -74,7 +74,12 @@ func runGatewayWorker(stationID, brokerURL string, serialPort serial.Port, seria
 	opts := mqtt.NewClientOptions().
 		AddBroker(brokerURL).
 		SetClientID(clientID).
-		SetAutoReconnect(true)
+		SetAutoReconnect(true).
+		SetKeepAlive(15 * time.Second) // 💡 保持適當的 KeepAlive 間隔
+
+	// 💡 【第一道防線】：設定 MQTT LWT (遺言機制)
+	// 當網關突發斷電或網路斷開時，MQTT Broker 會自動代發 OFFLINE 至 status 主題
+	opts.SetWill(topicStatus, "OFFLINE", 0, false)
 
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		log.Printf("[%s] 🟢 MQTT 已成功連線至 Broker", clientID)
@@ -82,6 +87,19 @@ func runGatewayWorker(stationID, brokerURL string, serialPort serial.Port, seria
 		// 發送網關上線狀態廣播
 		c.Publish(topicStatus, 0, false, []byte("ONLINE"))
 		log.Printf("[%s] 📡 已發送上線狀態廣播至 Topic: %s", clientID, topicStatus)
+
+		// 💡【新增】：啟動背景心跳定時器（每 15 秒自動報到，防止被 Server 逾時剔除）
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				if c.IsConnected() {
+					c.Publish(topicStatus, 0, false, "ONLINE")
+				} else {
+					return
+				}
+			}
+		}()
 
 		// 訂閱來自 Server 的指令 Topic
 		token := c.Subscribe(topicRx, 0, func(client mqtt.Client, msg mqtt.Message) {
@@ -91,7 +109,6 @@ func runGatewayWorker(stationID, brokerURL string, serialPort serial.Port, seria
 				serialMutex.Lock()
 				defer serialMutex.Unlock()
 
-				// 發送前清空 RX 快取，防止殘留髒數據影響長度與 CRC 判斷
 				_ = serialPort.ResetInputBuffer()
 
 				_, writeErr := serialPort.Write(payload)
@@ -125,7 +142,6 @@ func runGatewayWorker(stationID, brokerURL string, serialPort serial.Port, seria
 	}
 }
 
-// readFullModbusResponse 精準 Modbus RTU 串口讀取器 (支援動態長度計算與 Exception 攔截)
 func readFullModbusResponse(port serial.Port, reqPayload []byte, timeout time.Duration) []byte {
 	buf := make([]byte, 256)
 	var fullResp []byte
@@ -135,7 +151,7 @@ func readFullModbusResponse(port serial.Port, reqPayload []byte, timeout time.Du
 	if len(reqPayload) >= 2 {
 		funcCode := reqPayload[1]
 		if funcCode == 0x06 {
-			expectedLen = 8 // Write Single Register 回應固定為 8 Bytes
+			expectedLen = 8
 		}
 	}
 
@@ -144,12 +160,10 @@ func readFullModbusResponse(port serial.Port, reqPayload []byte, timeout time.Du
 		if err == nil && n > 0 {
 			fullResp = append(fullResp, buf[:n]...)
 
-			// 1. 如果是 Func 06，滿 8 碼立即返回
 			if expectedLen > 0 && len(fullResp) >= expectedLen {
 				return fullResp[:expectedLen]
 			}
 
-			// 2. 如果是 Func 03，動態計算 Header(3) + ByteCount + CRC(2)
 			if len(fullResp) >= 3 && fullResp[1] == 0x03 {
 				targetLen := 3 + int(fullResp[2]) + 2
 				if len(fullResp) >= targetLen {
@@ -157,7 +171,6 @@ func readFullModbusResponse(port serial.Port, reqPayload []byte, timeout time.Du
 				}
 			}
 
-			// 3. 遇到 Modbus Exception (FuncCode >= 0x80)，回應固定 5 位元組，立即返回
 			if len(fullResp) >= 5 && fullResp[1] >= 0x80 {
 				return fullResp[:5]
 			}
@@ -174,11 +187,9 @@ func handleMockRequest(payload []byte) []byte {
 	slaveID, funcCode := payload[0], payload[1]
 	regAddr := binary.BigEndian.Uint16(payload[2:4])
 
-	// Func 06 Write Reg 1199 (觸發深採) -> 原樣回覆作為成功確認
 	if funcCode == 0x06 && regAddr == 1199 {
 		return payload
 	}
-	// Func 03 Read Reg 1200 (讀取狀態) -> 回覆 0x0003 (Completed)
 	if funcCode == 0x03 && regAddr == 1200 {
 		buf := new(bytes.Buffer)
 		buf.Write([]byte{slaveID, 0x03, 0x02, 0x00, 0x03})
@@ -186,11 +197,9 @@ func handleMockRequest(payload []byte) []byte {
 		buf.Write([]byte{byte(crc & 0xFF), byte(crc >> 8)})
 		return buf.Bytes()
 	}
-	// Func 03 Read Reg 1219 (Ch1 數據 28 個暫存器)
 	if funcCode == 0x03 && regAddr == 1219 {
 		return generateChannelMockData(slaveID, 185.5, -0.92, 12.8)
 	}
-	// Func 03 Read Reg 1263 (Ch2 數據 28 個暫存器)
 	if funcCode == 0x03 && regAddr == 1263 {
 		return generateChannelMockData(slaveID, 200.0, -0.88, 7.0)
 	}
@@ -199,13 +208,13 @@ func handleMockRequest(payload []byte) []byte {
 
 func generateChannelMockData(slaveID byte, thickness, eOff, jAc float32) []byte {
 	buf := new(bytes.Buffer)
-	buf.Write([]byte{slaveID, 0x03, 56}) // Header + 56 Bytes Data
+	buf.Write([]byte{slaveID, 0x03, 56})
 	dataRaw := make([]byte, 56)
 	putF := func(o int, v float32) { binary.BigEndian.PutUint32(dataRaw[o:o+4], math.Float32bits(v)) }
 
-	putF(0, thickness) // Reg 1219 / 1263 (Offset 0)
-	putF(12, jAc)      // Reg 1225 / 1269 (Offset 12)
-	putF(32, eOff)     // Reg 1235 / 1279 (Offset 32)
+	putF(0, thickness)
+	putF(12, jAc)
+	putF(32, eOff)
 
 	buf.Write(dataRaw)
 	crc := iclmodbus.CalculateCRC16(buf.Bytes())

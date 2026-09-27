@@ -11,6 +11,9 @@ import (
 	"Metricorr_ICL-M_SI/pkg/iclmodbus"
 )
 
+// 💡 第二道防線：網關未收到數據/心跳的自動剔除逾時時間 (120 秒)
+const StationTimeoutThreshold = 120 * time.Second
+
 type MeasurementLog struct {
 	ID          uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	StationID   string    `gorm:"index;type:varchar(64)" json:"station_id"`
@@ -35,7 +38,7 @@ type MeasurementLog struct {
 type Storage struct {
 	db             *gorm.DB
 	measuringMap   sync.Map
-	onlineStations sync.Map // 存放已上線測站清單 (Key: stationID)
+	onlineStations sync.Map // Key: stationID (string), Value: lastSeen (time.Time)
 }
 
 func NewStorage(dbPath string) *Storage {
@@ -53,7 +56,7 @@ func NewStorage(dbPath string) *Storage {
 	return &Storage{db: db}
 }
 
-// 🌟【新增】：由 Broker Hook 呼叫，即時更新網關在線/離線狀態
+// 設定/更新網關在線狀態 (online=true 記錄當前時間, online=false 立即移除)
 func (s *Storage) SetStationStatus(stationID string, online bool) {
 	if online {
 		s.onlineStations.Store(stationID, time.Now())
@@ -64,11 +67,41 @@ func (s *Storage) SetStationStatus(stationID string, online bool) {
 	}
 }
 
-// 取得所有目前線上測站
+// 💡 重新整理最後活躍時間 (當收到 Modbus 回應或通訊封包時呼叫)
+func (s *Storage) TouchStation(stationID string) {
+	s.onlineStations.Store(stationID, time.Now())
+}
+
+// 💡 檢查特定測站目前是否在線 (同時驗證是否逾時)
+func (s *Storage) IsStationOnline(stationID string) bool {
+	val, loaded := s.onlineStations.Load(stationID)
+	if !loaded {
+		return false
+	}
+	lastSeen := val.(time.Time)
+	if time.Since(lastSeen) > StationTimeoutThreshold {
+		s.onlineStations.Delete(stationID)
+		log.Printf("⚠️ [Storage] 測站 [%s] 逾時 (%v) 未回應，自動判定為離線", stationID, time.Since(lastSeen).Round(time.Second))
+		return false
+	}
+	return true
+}
+
+// 💡 取得所有目前線上測站（第二道防線：自動剔除超過 45 秒未更新活力的網關）
 func (s *Storage) GetOnlineStations() []string {
 	var list []string
+	now := time.Now()
+
 	s.onlineStations.Range(func(key, value interface{}) bool {
-		list = append(list, key.(string))
+		stationID := key.(string)
+		lastSeen := value.(time.Time)
+
+		if now.Sub(lastSeen) > StationTimeoutThreshold {
+			s.onlineStations.Delete(stationID)
+			log.Printf("⚠️ [Storage] 測站 [%s] 逾時 (%v) 未回應，自動剔除並標記離線", stationID, now.Sub(lastSeen).Round(time.Second))
+		} else {
+			list = append(list, stationID)
+		}
 		return true
 	})
 	return list

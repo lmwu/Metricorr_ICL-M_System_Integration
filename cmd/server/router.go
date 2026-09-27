@@ -2,7 +2,7 @@ package main
 
 import (
 	"embed"
-	
+
 	"io/fs"
 	"net/http"
 	"time"
@@ -61,17 +61,26 @@ func SetupRouter(storage *Storage, mqttSvc *MQTTService) *gin.Engine {
 				c.Writer.Header().Set("Cache-Control", "no-cache")
 				c.Writer.Header().Set("Connection", "keep-alive")
 				c.Writer.Header().Set("Transfer-Encoding", "chunked")
+				c.Writer.Header().Set("X-Accel-Buffering", "no") // 💡 關鍵：防止瀏覽器或代理伺服器緩衝 SSE 數據
 
 				ticker := time.NewTicker(2 * time.Second)
 				defer ticker.Stop()
 
+				// 💡 1. 建立連線時立即推播一次現有狀態（不必等第一個 2 秒 Ticker）
+				list := storage.GetOnlineStations()
+				if list == nil {
+					list = []string{}
+				}
+				c.SSEvent("online_update", list)
+				c.Writer.Flush()
+
+				// 💡 2. 進入定時輪詢廣播
 				notifyChan := c.Request.Context().Done()
 				for {
 					select {
 					case <-notifyChan:
 						return
 					case <-ticker.C:
-						// 定期廣播目前線上測站清單
 						list := storage.GetOnlineStations()
 						if list == nil {
 							list = []string{}
