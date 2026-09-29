@@ -3,4 +3,6 @@
 2. 本次分享包含前端 UI, 後端 Server 與 Broker, 以及中介之模擬 Gateway : LTE + RS485 Serial-MQTT (可於實體主機安裝整合完成後移除全端中的中介模擬網關)。
 3. 利用合約盲點挾持客戶之權利運用資料, 係反商業文明行為。 請支持精進技術服務，遠離海蟑螂型中間代理商。
 
-Go TOV, Beat GOAT!
+Go KM, Beat GOAT!
+
+<img width="1745" height="938" alt="image" src="https://github.com/user-attachments/assets/de7ecfb4-3bf8-4d05-a0be-eec8163701e9" />
